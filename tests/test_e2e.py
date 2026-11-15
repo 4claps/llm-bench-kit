@@ -44,7 +44,7 @@ def test_speed_and_server_run(env):
         login(c)
         sysinfo = c.get("/api/system").json()
         assert len(sysinfo["snapshot"]["gpus"]) == 2
-        assert [e["name"] for e in sysinfo["engines"]] == ["fake"]
+        assert [e["name"] for e in sysinfo["engines"]] == ["fake", "external"]
         models = c.get("/api/models").json()
         mid = models["custom"][0]["id"]
 
@@ -122,3 +122,40 @@ def test_agent_module_flow(env):
         assert tasks == {("no_tool_required", 0): True, ("no_tool_required", 1): True,
                          ("err_case_search", 0): False, ("err_case_search", 1): False}
         assert d["summary"]["agent"]["all"]["total.pass_rate"]["median"] == 0.5
+
+
+def test_external_server_run(env):
+    import subprocess
+    import sys
+    from pathlib import Path
+    fake = Path(__file__).resolve().parent / "fakes" / "engines" / "fake" / "bin" / "llama-server"
+    port = 19000 + os.getpid() % 1000
+    srv = subprocess.Popen([sys.executable, str(fake), "--port", str(port)], stdout=subprocess.DEVNULL)
+    try:
+        url = f"http://127.0.0.1:{port}"
+        with make_client() as c:
+            login(c)
+            assert any(e["name"] == "external" and e["external"] for e in c.get("/api/system").json()["engines"])
+            for _ in range(50):  # wait for the fake to listen
+                if c.post("/api/runs", json={"engine": "external", "server_url": url, "gpus": [0],
+                                             "modules": {"server": {}}}).status_code == 200:
+                    break
+                time.sleep(0.1)
+            assert c.post("/api/runs", json={"engine": "external", "gpus": [0],
+                                             "modules": {"server": {}}}).status_code == 400
+            assert c.post("/api/runs", json={"engine": "external", "server_url": "http://127.0.0.1:1", "gpus": [0],
+                                             "modules": {"server": {}}}).status_code == 400
+            r = c.post("/api/runs", json={"engine": "external", "server_url": url + "/v1/", "gpus": [0, 1],
+                                          "modules": {"speed": {}, "server": {}}}).json()
+            assert any(b.startswith("speed:") for b in r["preflight"]["block"])
+            r = c.post("/api/runs", json={"engine": "external", "server_url": url, "gpus": [0, 1], "label": "ext",
+                                          "modules": {"server": {"reps": 2}}}).json()
+            assert r["spec"]["model"] == "external: fake" and r["spec"]["comparable"] is False
+            assert r["spec"]["server_url"] == url and not r["preflight"]["block"], r["preflight"]
+            assert c.post(f"/api/runs/{r['id']}/start").status_code == 200
+            assert wait_done(c, r["id"]) == "done"
+            sv = c.get(f"/api/runs/{r['id']}").json()["summary"]["server"]
+            assert list(sv) == ["external"]
+            assert sv["external"]["code.tg"]["n"] == 2 and sv["external"]["prose.pp"]["median"] == 380.0
+    finally:
+        srv.kill()

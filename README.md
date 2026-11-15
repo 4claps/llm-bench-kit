@@ -64,6 +64,26 @@ Builds use CUDA 12.9, the last toolkit line that still targets sm_60/sm_70.
 The CPU backend is built for every x86 variant and picked at runtime, so old
 Xeons without AVX2 still work.
 
+### External server
+
+The `external` engine benchmarks an OpenAI-compatible server that is already
+running, such as another engine (Strata) or a llama-server you started
+yourself. Give its URL on the New Run page; the kit reads the model id from
+`/v1/models` unless you type one. Only the **server** and **agent** modules
+run (speed and offload need llama.cpp's own tools). Things to know:
+
+- The kit doesn't start, stop or configure that server, so MTP, KV cache type
+  and context size are whatever the server uses. The server module runs one
+  pass, labelled `external`.
+- Each server prompt gets a unique prefix, so a server that ignores
+  `cache_prompt: false` can't reuse an earlier read of the same prompt.
+- A server may ignore `ignore_eos` and stop early. Token counts are stored
+  next to every rate; check them before you compare.
+- Tick the GPUs that server runs on, on this machine, so telemetry and
+  guardrails watch the right cards. If the server runs in another container,
+  start the kit's container so it can reach it (the host's LAN IP works).
+- Results are marked not comparable with other machines.
+
 ## Making results comparable
 
 Numbers from two machines can only be compared when the model file, engine

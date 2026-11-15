@@ -24,6 +24,7 @@ from . import hw
 from .config import Config
 from .db import DB
 from .guardrails import Guardrails
+from .llserver import probe_external
 from .models import ModelStore
 from .modules import MODULE_ORDER, MODULES
 from .telemetry import Sampler
@@ -163,6 +164,15 @@ class Runner:
         engine = self.engine(str(spec.get("engine") or ""))
         if not engine:
             raise ValueError("pick an available engine")
+        server_url = server_model = ""
+        if engine.get("external"):
+            server_url = str(spec.get("server_url") or "").strip().rstrip("/")
+            if not server_url.startswith(("http://", "https://")):
+                raise ValueError("the external engine needs a server URL such as http://10.0.0.5:8080")
+            ok, server_model, msg = probe_external(server_url)
+            if not ok:
+                raise ValueError(f"external server not reachable: {msg}")
+            server_model = str(spec.get("server_model") or "").strip()[:200] or server_model
         n_gpus = len(self.snapshot().get("gpus") or [])
         gpus = sorted({int(g) for g in spec.get("gpus") or []})
         if not gpus:
@@ -179,9 +189,12 @@ class Runner:
         unknown = set(mods) - set(MODULES)
         if unknown:
             raise ValueError(f"unknown modules: {sorted(unknown)}")
-        path, comparable = self.store.model_path(model_id)
-        if path is None:
-            raise ValueError("model is not present on this machine (download it first)")
+        if engine.get("external"):
+            model_id, comparable = f"external: {server_model or 'unknown model'}", False
+        else:
+            path, comparable = self.store.model_path(model_id)
+            if path is None:
+                raise ValueError("model is not present on this machine (download it first)")
         split = str(spec.get("split") or "")
         if split and split not in engines_mod.SPLIT_MODES:
             raise ValueError(f"split must be one of {engines_mod.SPLIT_MODES} (or empty for the engine default)")
@@ -205,10 +218,11 @@ class Runner:
             power_cap = None
         return {"model": model_id, "engine": engine["name"], "gpus": gpus, "modules": norm,
                 "split": split or engine.get("multi_gpu_split", "layer"), "abort_on": abort_on,
-                "label": str(spec.get("label") or "")[:120], "comparable": comparable, "power_cap": power_cap}
+                "label": str(spec.get("label") or "")[:120], "comparable": comparable, "power_cap": power_cap,
+                **({"server_url": server_url, "server_model": server_model} if engine.get("external") else {})}
 
     def estimate(self, spec: dict) -> int:
-        path, _ = self.store.model_path(spec["model"])
+        path = None if spec.get("server_url") else self.store.model_path(spec["model"])[0]
         gb = path.stat().st_size / 1e9 if path else 10
         return sum(MODULES[n].estimate_s(p, gb) for n, p in spec["modules"].items())
 
@@ -217,20 +231,27 @@ class Runner:
         block, warn = [], []
         snap = self.snapshot(refresh=True)
         engine = self.engine(spec["engine"])
-        model_meta = self.store.get(spec["model"])
+        external = bool(engine and engine.get("external"))
+        model_meta = None if external else self.store.get(spec["model"])
         status = self.store.status(model_meta) if model_meta else None
         if self.active:
             block.append(f"run {self.active.run_id} is still running")
+        if external:
+            ok, _, msg = probe_external(spec["server_url"])
+            if not ok:
+                block.append(f"external server not reachable: {msg}")
+            warn.append("external server: the kit only sends requests; GPU numbers are only meaningful if "
+                        "the selected GPUs are the ones that server runs on, on this machine")
         if model_meta and status and not status["verified"]:
             warn.append("model checksum not verified yet (Models page → Verify); results may not be comparable")
-        if not spec["comparable"]:
+        if not spec["comparable"] and not external:
             warn.append("custom model: results are marked not comparable with other machines")
         for name, p in spec["modules"].items():
             for prob in MODULES[name].check(p, model_meta, engine, snap):
                 block.append(f"{name}: {prob}")
         ok, out = hw.run_cmd(["nvidia-smi", "--query-compute-apps=pid,process_name,gpu_uuid",
                               "--format=csv,noheader"])
-        if ok and out.strip():
+        if ok and out.strip() and not external:  # an external server is expected to hold its GPUs
             uuids = {g["uuid"] for g in snap.get("gpus", []) if g.get("index") in spec["gpus"]}
             busy = [l for l in out.strip().splitlines() if any(u in l for u in uuids)]
             if busy:
@@ -271,9 +292,10 @@ class Runner:
                 raise ValueError("preflight blocked: " + "; ".join(pf["block"]))
             restore = self._apply_power_cap(spec)
             snap = self.snapshot(refresh=bool(restore))  # so the run records the cap it ran at
-            path, _ = self.store.model_path(spec["model"])
+            external = bool(spec.get("server_url"))
+            path = None if external else self.store.model_path(spec["model"])[0]
             ctx = RunContext(self, run_id, spec, self.engine(spec["engine"]), path,
-                             self.store.get(spec["model"]), snap)
+                             None if external else self.store.get(spec["model"]), snap)
             ctx.power_restore = restore
             self.active = ctx
             self.db.update_run(run_id, status="running", started_at=time.time(),
@@ -320,7 +342,8 @@ class Runner:
     def _work(self, ctx: RunContext) -> None:
         status, error = "done", None
         try:
-            ctx.log("runner", f"run {ctx.run_id}: engine {ctx.engine['name']}, model {ctx.model_path.name}, "
+            ctx.log("runner", f"run {ctx.run_id}: engine {ctx.engine['name']}, "
+                              f"model {ctx.model_path.name if ctx.model_path else ctx.spec['model']}, "
                               f"GPUs {ctx.gpus}, modules {list(ctx.spec['modules'])}"
                               + (f", power cap {ctx.spec['power_cap']} W" if ctx.spec.get("power_cap") else ""))
             for name, params in ctx.spec["modules"].items():

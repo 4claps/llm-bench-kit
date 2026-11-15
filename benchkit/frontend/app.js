@@ -214,6 +214,11 @@ async function viewRun(_, gen = state.gen) {
       <label class="field"><span>Multi-GPU split</span><select id="r-split"><option value="">engine default</option><option>layer</option><option>tensor</option></select></label>
       <label class="field" style="flex:1"><span>Label (optional)</span><input type="text" id="r-label" maxlength="120"></label>
     </div>
+    <div class="row" id="r-ext" hidden>
+      <label class="field" style="flex:2"><span>Server URL</span><input type="text" id="r-url" placeholder="http://10.0.0.5:8080"></label>
+      <label class="field" style="flex:1"><span>Model id (optional)</span><input type="text" id="r-smodel" placeholder="asked from the server"></label>
+    </div>
+    <div class="small muted" id="r-ext-note" hidden>An OpenAI-compatible server that is already running, such as another engine. Only the server and agent modules run; results are marked not comparable. Tick the GPUs that server uses on this machine so telemetry and guardrails watch the right cards.</div>
     <h3>GPUs</h3>
     <div class="chips" id="r-gpus">${gpus.map((g) => `<label><input type="checkbox" value="${g.index}" checked> ${g.index}: ${esc(g.name)} (${Math.round((g.memory_total || 0) / 1024)} GB)</label>`).join("") || '<span class="err">No GPUs visible.</span>'}</div>
     <h3>Presets</h3>
@@ -239,6 +244,8 @@ async function viewRun(_, gen = state.gen) {
   <div id="r-confirm"></div>`;
   $$(".module").forEach((el) => $(".mod-on", el).addEventListener("change", (e) => el.classList.toggle("off", !e.target.checked)));
   $("#r-review").onclick = reviewRun;
+  $("#r-engine").addEventListener("change", syncEngine);
+  syncEngine();
   $("#pc-change").addEventListener("change", (e) => ($("#pc-choices").hidden = !e.target.checked));
   $("#r-preset-save").onclick = async () => {
     const name = $("#r-preset-name").value.trim(); if (!name) return toast("Name the preset first");
@@ -271,6 +278,22 @@ function powerCapCard(sys) {
   </div>`;
 }
 
+function isExternal() {
+  return !!(state.system.engines.find((e) => e.name === $("#r-engine").value) || {}).external;
+}
+
+function syncEngine() {
+  const ext = isExternal();
+  $("#r-ext").hidden = $("#r-ext-note").hidden = !ext;
+  $("#r-model").disabled = $("#r-split").disabled = ext;
+  for (const el of $$(".module")) {
+    if (!["speed", "offload"].includes(el.dataset.mod)) continue;
+    const box = $(".mod-on", el);
+    box.disabled = ext;
+    if (ext && box.checked) { box.checked = false; el.classList.add("off"); }
+  }
+}
+
 function collectSpec(forPreset = false) {
   const modules = {};
   for (const el of $$(".module")) {
@@ -281,12 +304,15 @@ function collectSpec(forPreset = false) {
   const abort_on = [$("#g-low").checked && "low_clock", $("#g-thermal").checked && "thermal"].filter(Boolean);
   return { model: $("#r-model").value, engine: $("#r-engine").value, split: $("#r-split").value, label: forPreset ? "" : $("#r-label").value,
     gpus: $$("#r-gpus input:checked").map((i) => +i.value), modules, abort_on,
-    power_cap: $("#pc-change").checked && $("input[name=pc]:checked") ? +$("input[name=pc]:checked").value : null };
+    power_cap: $("#pc-change").checked && $("input[name=pc]:checked") ? +$("input[name=pc]:checked").value : null,
+    ...(isExternal() ? { server_url: $("#r-url").value.trim(), server_model: $("#r-smodel").value.trim() } : {}) };
 }
 
 function applySpec(spec) {
   if (spec.model) $("#r-model").value = spec.model;
   if (spec.engine) $("#r-engine").value = spec.engine;
+  $("#r-url").value = spec.server_url || "";
+  $("#r-smodel").value = spec.server_model || "";
   $("#r-split").value = spec.split || "";
   $$("#r-gpus input").forEach((i) => (i.checked = (spec.gpus || []).includes(+i.value)));
   for (const el of $$(".module")) {
@@ -309,6 +335,7 @@ function applySpec(spec) {
   if (pc && !$("#pc-change").disabled) pc.checked = true;
   $("#pc-change").checked = !!(pc && !$("#pc-change").disabled);
   $("#pc-choices").hidden = !$("#pc-change").checked;
+  syncEngine();
 }
 
 async function reviewRun() {
@@ -319,7 +346,7 @@ async function reviewRun() {
   const pf = r.preflight;
   box.innerHTML = `<div class="card">
     <h2>Confirm</h2>
-    <dl class="kv"><dt>Model</dt><dd>${esc(r.spec.model)}</dd><dt>Engine</dt><dd>${esc(r.spec.engine)}</dd>
+    <dl class="kv"><dt>Model</dt><dd>${esc(r.spec.model)}</dd><dt>Engine</dt><dd>${esc(r.spec.engine)}${r.spec.server_url ? " at " + esc(r.spec.server_url) : ""}</dd>
       <dt>GPUs</dt><dd>${esc(r.spec.gpus.join(", "))}${r.spec.gpus.length > 1 ? ", " + esc(r.spec.split) + " split" : ""}</dd><dt>Modules</dt><dd>${esc(Object.keys(r.spec.modules).join(", "))}</dd>
       <dt>Power cap</dt><dd>${r.spec.power_cap ? esc(r.spec.power_cap + " W for this run, then back to " + powerCapText(state.system.snapshot, r.spec.gpus)) : esc(powerCapText(state.system.snapshot, r.spec.gpus) + " (unchanged)")}</dd>
       <dt>Estimated time</dt><dd>about ${esc(dur(r.estimate_s))} (rough)</dd></dl>
@@ -478,7 +505,7 @@ async function viewDetail(id, gen = state.gen) {
   ${r.error ? `<div class="card err">${esc(r.error)}</div>` : ""}
   <div class="grid">
     <div class="card"><h2>Run</h2><dl class="kv">
-      <dt>Model</dt><dd>${esc(spec.model)}${spec.comparable === false ? " (custom, not comparable)" : ""}</dd><dt>Engine</dt><dd>${esc(spec.engine)}</dd>
+      <dt>Model</dt><dd>${esc(spec.model)}${spec.comparable === false ? " (custom, not comparable)" : ""}</dd><dt>Engine</dt><dd>${esc(spec.engine)}${spec.server_url ? " at " + esc(spec.server_url) : ""}</dd>
       <dt>GPUs</dt><dd>${esc((spec.gpus || []).join(", "))}${(spec.gpus || []).length > 1 && spec.split ? ", " + esc(spec.split) + " split" : ""}</dd><dt>Started</dt><dd>${esc(when(r.started_at))}</dd>
       <dt>Finished</dt><dd>${esc(when(r.finished_at))}</dd><dt>Hardware</dt><dd>${esc(hwLine(snap))}</dd>
       <dt>Power cap</dt><dd>${esc(powerCapText(snap, spec.gpus) || "unknown")}${spec.power_cap ? " (set for this run)" : ""}</dd></dl>

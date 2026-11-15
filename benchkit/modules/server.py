@@ -3,13 +3,21 @@
 Fixed prompts at temperature 0 with a fixed seed and a fixed output length
 (ignore_eos), so every machine generates the same number of tokens. MTP
 draft acceptance still varies a little run to run; report medians.
+
+Against an external server (another engine) the MTP choice is the server's
+own business, so there is one pass labelled "external". Each prompt gets a
+unique prefix so a server that ignores cache_prompt (Strata keeps its own
+conversation cache) cannot reuse an earlier read of it. Such servers may also
+ignore ignore_eos and stop early; the token counts are stored beside every
+rate, so check them before comparing.
 """
 
 from __future__ import annotations
 
+import uuid
 from pathlib import Path
 
-from ..llserver import LlamaServer
+from ..llserver import open_server
 from .base import Module, load_s
 
 PROMPTS_DIR = Path(__file__).resolve().parents[1] / "prompts"
@@ -38,6 +46,8 @@ class ServerModule(Module):
     }
 
     def check(self, p, model, engine, snapshot):
+        if engine.get("external"):
+            return []  # the server decides about MTP
         probs = []
         if "on" in p["mtp"] and model is not None and not model.get("mtp"):
             probs.append("MTP 'on' needs a model with MTP heads")
@@ -50,29 +60,34 @@ class ServerModule(Module):
 
     def run(self, ctx, p):
         P = prompts()
-        steps = len(p["mtp"]) * p["reps"]
+        external = bool(ctx.engine.get("external"))
+        variants = ["external"] if external else p["mtp"]
+        steps = len(variants) * p["reps"]
         step = 0
-        for mtp in p["mtp"]:
+        for mtp in variants:
             ctx.cool_down()
-            with LlamaServer(ctx, ["-ctk", p["kv"], "-ctv", p["kv"]], p["ctx"], mtp=(mtp == "on")) as srv:
+            with open_server(ctx, ["-ctk", p["kv"], "-ctv", p["kv"]], p["ctx"], mtp=(mtp == "on")) as srv:
                 srv.chat({"messages": [{"role": "user", "content": "Say hello."}], "max_tokens": 16,
                           "cache_prompt": False})  # warmup, discarded
                 for rep in range(p["reps"]):
                     step += 1
-                    ctx.progress(self.name, step, steps, f"MTP {mtp}, run {rep + 1}")
+                    ctx.progress(self.name, step, steps, f"{'external' if external else 'MTP ' + mtp}, run {rep + 1}")
                     if rep:
                         ctx.cool_down()
                     for pname, text in P.items():
                         if ctx.abort.is_set():
                             return
+                        if external:
+                            text = f"[run {uuid.uuid4().hex}] {text}"
                         j = srv.chat({"messages": [{"role": "user", "content": text}],
                                       "max_tokens": p["max_tokens"], "temperature": 0, "seed": 42,
                                       "ignore_eos": True, "cache_prompt": False,
                                       "chat_template_kwargs": {"enable_thinking": False}})
                         t = j.get("timings") or {}
-                        var = f"mtp={mtp}"
+                        var = "external" if external else f"mtp={mtp}"
                         ctx.result(self.name, rep, var, f"{pname}.pp", t.get("prompt_per_second"), "t/s",
-                                   {"tokens": t.get("prompt_n")})
+                                   {"tokens": t.get("prompt_n"),
+                                    **({"cached": t["cache_n"]} if t.get("cache_n") is not None else {})})
                         ctx.result(self.name, rep, var, f"{pname}.tg", t.get("predicted_per_second"), "t/s",
                                    {"tokens": t.get("predicted_n")})
                         if t.get("draft_n"):

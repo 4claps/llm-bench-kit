@@ -51,6 +51,11 @@ class SpeedModule(Module):
         "samples": {"type": "int", "default": 3, "min": 1, "max": 10, "label": "llama-bench -r per run"},
     }
 
+    def check(self, p, model, engine, snapshot):
+        if engine.get("external"):
+            return ["llama-bench only runs llama.cpp, so it can't run against an external server"]
+        return []
+
     def estimate_s(self, p: dict, model_gb: float) -> int:
         per = load_s(model_gb) + p["samples"] * sum(15 + d / 300 for d in p["depths"])
         return int(p["reps"] * len(p["kv"]) * per)

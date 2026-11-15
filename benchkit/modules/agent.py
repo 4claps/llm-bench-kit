@@ -20,7 +20,7 @@ from pathlib import Path
 
 import yaml
 
-from ..llserver import LlamaServer
+from ..llserver import open_server
 from ..procs import Proc
 from .base import Module, load_s
 
@@ -102,14 +102,17 @@ class AgentModule(Module):
 
     def run(self, ctx, p):
         ab = load_abeval(ctx.cfg.hermes_source)
-        use_mtp = bool(p["mtp"] and ctx.model_meta and ctx.model_meta.get("mtp") and ctx.engine.get("mtp_args"))
+        external = bool(ctx.engine.get("external"))
+        use_mtp = bool(not external and p["mtp"] and ctx.model_meta and ctx.model_meta.get("mtp") and ctx.engine.get("mtp_args"))
         base = ctx.cfg.data_dir / "agent" / ctx.run_id
         home = base / "home"
         home.mkdir(parents=True, exist_ok=True)
         model_label = f"benchkit-{ctx.run_id}"
         ctx.cool_down()
-        with LlamaServer(ctx, ["-ctk", p["kv"], "-ctv", p["kv"]], p["ctx"], mtp=use_mtp,
+        with open_server(ctx, ["-ctk", p["kv"], "-ctv", p["kv"]], p["ctx"], mtp=use_mtp,
                          record=(self.name, f"mtp={'on' if use_mtp else 'off'}")) as srv:
+            if external:
+                model_label = srv.model or model_label  # a hosted model id, so the server accepts it
             (home / "config.yaml").write_text(yaml.safe_dump(hermes_config(
                 srv.base + "/v1", model_label, p["ctx"], p["max_tokens"], p["task_timeout_s"])))
             steps = p["reps"] * len(p["tasks"])
