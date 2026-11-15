@@ -158,6 +158,25 @@ def test_model_store_adopts_renamed_file_and_verifies(tmp_path):
     assert st.model_path("custom:../../etc/passwd")[0] is None
 
 
+def test_partial_size_match_does_not_hide_custom_split_model(tmp_path):
+    first, last = b"GGUF" + b"a" * 100, b"GGUF" + b"z" * 300
+    man = tmp_path / "m.yaml"
+    man.write_text(yaml.safe_dump({"schema": 1, "models": [{
+        "id": "q2", "label": "Q2", "repo": "x/y", "kind": "moe", "mtp": False, "vram_gb": 1,
+        "files": [{"name": f"Q2-0000{i}-of-00003.gguf", "size": n, "sha256": "0" * 64}
+                  for i, n in ((1, len(first)), (2, 999), (3, len(last)))]}]}))
+    models = tmp_path / "models" / "q4"
+    models.mkdir(parents=True)
+    # same sizes as the Q2's first and last shard, different middle shard: a different quant
+    (models / "Q4-00001-of-00003.gguf").write_bytes(first)
+    (models / "Q4-00002-of-00003.gguf").write_bytes(b"GGUF" + b"m" * 500)
+    (models / "Q4-00003-of-00003.gguf").write_bytes(last)
+    st = ModelStore(tmp_path / "models", tmp_path / "data", man)
+    lst = st.list()
+    assert not lst["standard"][0]["present"]
+    assert [c["id"] for c in lst["custom"]] == ["custom:q4/Q4-00001-of-00003.gguf"]
+
+
 # ---------------- db + export ----------------
 def test_db_results_and_markdown(tmp_path):
     db = DB(tmp_path / "x.sqlite")
