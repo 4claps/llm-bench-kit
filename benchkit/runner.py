@@ -20,7 +20,7 @@ import traceback
 from pathlib import Path
 
 from . import engines as engines_mod
-from . import hw
+from . import hw, procs
 from .config import Config
 from .db import DB
 from .guardrails import Guardrails
@@ -198,6 +198,21 @@ class Runner:
         split = str(spec.get("split") or "")
         if split and split not in engines_mod.SPLIT_MODES:
             raise ValueError(f"split must be one of {engines_mod.SPLIT_MODES} (or empty for the engine default)")
+        ngl = spec.get("ngl")
+        if ngl in (None, ""):
+            ngl = None  # not set: launches keep the default -ngl 99 (all layers)
+        else:
+            msg = "GPU layers (-ngl) must be a whole number from 0 to 999, or empty for all layers"
+            try:
+                n = int(ngl)
+            except (TypeError, ValueError):
+                raise ValueError(msg)
+            # no truncation of 44.5 / "44.5" and no bool sneaking in as 0/1
+            if isinstance(ngl, bool) or (isinstance(ngl, (int, float)) and n != ngl):
+                raise ValueError(msg)
+            if not 0 <= n <= 999:
+                raise ValueError("GPU layers (-ngl) must be between 0 and 999")
+            ngl = n
         # both guardrails abort by default; an explicit [] turns them off
         abort_on = [a for a in spec.get("abort_on", ["low_clock", "thermal"]) or [] if a in ("low_clock", "thermal")]
         power_cap = spec.get("power_cap")
@@ -219,6 +234,7 @@ class Runner:
         return {"model": model_id, "engine": engine["name"], "gpus": gpus, "modules": norm,
                 "split": split or engine.get("multi_gpu_split", "layer"), "abort_on": abort_on,
                 "label": str(spec.get("label") or "")[:120], "comparable": comparable, "power_cap": power_cap,
+                "ngl": ngl,
                 **({"server_url": server_url, "server_model": server_model} if engine.get("external") else {})}
 
     def estimate(self, spec: dict) -> int:
@@ -263,7 +279,14 @@ class Runner:
             warn.append(f"only {free / 1e9:.1f} GB free in the data dir")
         vram = sum((g.get("memory_total") or 0) for g in snap.get("gpus", []) if g.get("index") in spec["gpus"]) / 1024
         if model_meta and vram and model_meta["vram_gb"] > vram and set(spec["modules"]) - {"offload"}:
-            warn.append(f"model needs about {model_meta['vram_gb']} GB VRAM; selected GPUs have {vram:.0f} GB")
+            if spec.get("ngl") is None:
+                warn.append(f"model needs about {model_meta['vram_gb']} GB VRAM; selected GPUs have {vram:.0f} GB — "
+                            "set GPU layers (-ngl) to keep part of the model in RAM, or pick more GPUs")
+        if not external:  # an external server is expected to hold its GPUs
+            for gi, used in self._used_vram().items():
+                if gi in spec["gpus"] and used > self.cfg.vram_busy_mib:
+                    block.append(f"GPU {gi} already has {used:.0f} MiB VRAM in use; nvidia-smi inside a container "
+                                 "may not list the process — check nvidia-smi on the host and free the GPU first")
         for g in snap.get("gpus", []):
             if g.get("index") in spec["gpus"] and g.get("pcie_link_width_max") and \
                     g.get("pcie_link_width_current") and g["pcie_link_width_current"] < g["pcie_link_width_max"]:
@@ -272,6 +295,22 @@ class Runner:
         return {"block": block, "warn": warn}
 
     # ---------------- run ----------------
+    def _used_vram(self) -> dict[int, float]:
+        """memory.used (MiB) per GPU index from nvidia-smi; {} if unavailable."""
+        ok, out = hw.run_cmd(["nvidia-smi", "--query-gpu=index,memory.used", "--format=csv,noheader,nounits"])
+        if not ok:
+            return {}
+        used: dict[int, float] = {}
+        for line in out.strip().splitlines():
+            parts = [p.strip() for p in line.split(",")]
+            v = hw._num(parts[1]) if len(parts) == 2 else None
+            if len(parts) == 2 and isinstance(v, (int, float)):
+                try:
+                    used[int(parts[0])] = float(v)
+                except ValueError:
+                    continue
+        return used
+
     def create(self, spec_in: dict) -> dict:
         spec = self.validate(spec_in)
         run_id = time.strftime("%Y%m%d-%H%M%S-") + secrets.token_hex(3)
@@ -359,6 +398,17 @@ class Runner:
             ctx.log("runner", traceback.format_exc())
         finally:
             ctx.abort.set()  # stops the sampler
+            try:  # no benchmark process may survive the run; the sweep itself must never fail it
+                killed = procs.kill_all()
+                if killed:
+                    ctx.event("error", "stray_process", "killed leftover benchmark processes: " + "; ".join(killed))
+                if not ctx.engine.get("external"):  # that server is expected to hold its GPUs
+                    for gi, used in self._used_vram().items():
+                        if gi in ctx.gpus and used > self.cfg.vram_busy_mib:
+                            ctx.event("warn", "vram_left", f"GPU {gi} still has {used:.0f} MiB in use after the run; "
+                                                           "a process outside the kit's view may still hold it")
+            except Exception:  # noqa: BLE001
+                ctx.log("runner", traceback.format_exc())
             self._restore_power_cap(ctx.power_restore, ctx)
             ctx.flush_logs()
             self.db.update_run(ctx.run_id, status=status, finished_at=time.time(), error=error)

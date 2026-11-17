@@ -71,6 +71,8 @@ def test_speed_and_server_run(env):
         assert len(c.get(f"/api/runs/{r['id']}/telemetry").json()) >= 1
         logs = c.get(f"/api/runs/{r['id']}/logs?tail=5000").json()
         assert any("llama-bench" in l["line"] and "-sm layer" in l["line"] for l in logs)
+        assert any("llama-bench" in l["line"] and "-ngl 99" in l["line"] for l in logs)
+        assert any("starting llama-server" in l["line"] and "-ngl 99" in l["line"] for l in logs)
 
         b = c.get(f"/api/runs/{r['id']}/export.json").json()
         assert b["bundle_schema"] == 1 and "GPU-fake" not in str(b)
@@ -104,6 +106,63 @@ def test_abort(env):
         assert c.post(f"/api/runs/{r['id']}/start").status_code == 409
         assert c.post(f"/api/runs/{r['id']}/abort").status_code == 200
         assert wait_done(c, r["id"]) == "aborted"
+
+
+def test_ngl_in_launch_argv(env):
+    with make_client() as c:
+        login(c)
+        mid = c.get("/api/models").json()["custom"][0]["id"]
+        r = c.post("/api/runs", json={"model": mid, "engine": "fake", "gpus": [0], "ngl": "44",
+                                      "modules": {"speed": {"reps": 1, "kv": ["f16"], "depths": [0]},
+                                                  "offload": {"reps": 1},
+                                                  "server": {"reps": 1, "mtp": ["off"]}}}).json()
+        assert r["spec"]["ngl"] == 44
+        assert not r["preflight"]["block"], r["preflight"]
+        c.post(f"/api/runs/{r['id']}/start")
+        assert wait_done(c, r["id"]) == "done"
+        logs = c.get(f"/api/runs/{r['id']}/logs?tail=5000").json()
+        bench = [l["line"] for l in logs if l["line"].startswith("llama-bench:")]
+        srv = [l["line"] for l in logs if "starting llama-server" in l["line"]]
+        assert len(bench) == 2 and all("-ngl 44" in l for l in bench)  # speed and offload
+        assert srv and all("-ngl 44" in l for l in srv)
+        assert not any("-ngl 99" in l["line"] for l in logs)
+        md = c.get(f"/api/runs/{r['id']}/export.md").text
+        assert "ngl 44" in md
+
+
+def test_preflight_blocks_busy_vram(env, monkeypatch):
+    with make_client() as c:
+        login(c)
+        mid = c.get("/api/models").json()["custom"][0]["id"]
+        spec = {"model": mid, "engine": "fake", "gpus": [0], "modules": {"speed": {"reps": 1}}}
+        assert not c.post("/api/runs", json=spec).json()["preflight"]["block"]  # fake uses 120 MiB
+        monkeypatch.setenv("FAKE_NVIDIA_USED_MB", "8000")
+        r = c.post("/api/runs", json=spec).json()
+        assert any("VRAM in use" in b and "GPU 0" in b for b in r["preflight"]["block"])
+
+
+def test_failing_module_leaves_no_tracked_process(env, monkeypatch):
+    from benchkit.modules import MODULES
+    from benchkit.procs import Proc, kill_all
+
+    def boom(ctx, p):
+        Proc(["sleep", "300"])  # launched and never waited on: the leak the sweep must catch
+        monkeypatch.setenv("FAKE_NVIDIA_USED_MB", "8000")  # so the post-run VRAM check fires too
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(MODULES["speed"], "run", boom)
+    with make_client() as c:
+        login(c)
+        mid = c.get("/api/models").json()["custom"][0]["id"]
+        r = c.post("/api/runs", json={"model": mid, "engine": "fake", "gpus": [0],
+                                      "modules": {"speed": {"reps": 1}}}).json()
+        assert not r["preflight"]["block"]
+        c.post(f"/api/runs/{r['id']}/start")
+        assert wait_done(c, r["id"]) == "failed"
+        d = c.get(f"/api/runs/{r['id']}").json()
+        assert any(e["kind"] == "stray_process" and "sleep" in e["message"] for e in d["events"])
+        assert any(e["kind"] == "vram_left" and "GPU 0" in e["message"] for e in d["events"])
+    assert kill_all() == []  # nothing survived the run
 
 
 @pytest.mark.skipif(not os.environ.get("BENCHKIT_TEST_HERMES_SOURCE"), reason="needs a hermes-agent checkout")

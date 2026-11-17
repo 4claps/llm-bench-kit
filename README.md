@@ -51,6 +51,13 @@ Open `http://<this-machine>:8090`, paste the token, then:
 Nothing else may use the selected GPUs during a run; the preflight check
 blocks the run if another process holds them.
 
+If the model is bigger than the VRAM of the GPUs you picked, set **GPU
+layers (`-ngl`)** on the New Run page: only that many transformer layers go
+to the GPUs and the rest stays in system RAM (for example `-ngl 44` for a
+model that does not fit otherwise). Left empty, the kit offloads all layers,
+which fails with an out-of-memory error for models larger than the selected
+cards.
+
 ## Engines
 
 | Engine | Source | Multi-GPU | Notes |
@@ -112,6 +119,7 @@ All optional, as environment variables:
 | `BENCHKIT_THERMAL_WARN_C` | `80` | thermal guardrail |
 | `BENCHKIT_GUARDRAIL_SUSTAIN_S` | `10` | how long a condition must hold before it fires |
 | `BENCHKIT_SAMPLE_INTERVAL_S` | `1` | telemetry interval |
+| `BENCHKIT_VRAM_BUSY_MIB` | `1024` | used VRAM on a selected GPU that blocks a run (and warns after one) |
 
 ## Security
 

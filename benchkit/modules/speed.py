@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 
-from ..engines import env_for, split_args
+from ..engines import env_for, ngl_args, split_args
 from ..procs import Proc
 from .base import Module, load_s
 
@@ -69,13 +69,13 @@ class SpeedModule(Module):
                 step += 1
                 ctx.progress(self.name, step, steps, f"run {rep + 1}, KV {kv}")
                 ctx.cool_down()
-                argv = [f"{e['bin_dir']}/llama-bench", "-m", str(ctx.model_path), "-ngl", "99",
+                argv = [f"{e['bin_dir']}/llama-bench", "-m", str(ctx.model_path), *ngl_args(ctx.spec),
                         "-fa", "1", "-ctk", kv, "-ctv", kv, "-p", str(p["pp"]), "-n", str(p["tg"]),
                         "-d", ",".join(str(d) for d in p["depths"]), "-r", str(p["samples"]),
                         "-o", "jsonl", *split_args(e, ctx.gpus, ctx.spec.get("split"))]
                 ctx.log("runner", "llama-bench: " + " ".join(argv))
-                proc = Proc(argv, env=env_for(e, ctx.gpus), on_line=lambda l: ctx.log("bench", l))
-                rc = proc.wait(timeout=3600, abort=ctx.abort)
+                with Proc(argv, env=env_for(e, ctx.gpus), on_line=lambda l: ctx.log("bench", l)) as proc:
+                    rc = proc.wait(timeout=3600, abort=ctx.abort)
                 if ctx.abort.is_set():
                     return
                 rows = parse_bench_jsonl(proc.lines)

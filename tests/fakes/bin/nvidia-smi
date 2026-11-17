@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Fake nvidia-smi for tests: two P100s, answers the queries the kit makes."""
+"""Fake nvidia-smi for tests: two P100s, answers the queries the kit makes.
+
+FAKE_NVIDIA_USED_MB overrides memory.used (default 120, below the
+BENCHKIT_VRAM_BUSY_MIB threshold so normal runs are not blocked).
+"""
+import os
 import sys
 a = " ".join(sys.argv[1:])
 if "--query-compute-apps" in a:
@@ -15,7 +20,8 @@ vals = {"index": None, "name": "Tesla P100-PCIE-16GB", "uuid": "GPU-fake-{i}", "
         "pcie.link.gen.current": "3", "pcie.link.gen.max": "3",
         "pcie.link.width.current": "16", "pcie.link.width.max": "16", "clocks.max.sm": "1328",
         "clocks.max.mem": "715", "temperature.gpu": "41", "clocks.sm": "1328", "clocks.mem": "715",
-        "power.draw": "120.5", "utilization.gpu": "95", "utilization.memory": "60", "memory.used": "9000",
+        "power.draw": "120.5", "utilization.gpu": "95", "utilization.memory": "60",
+        "memory.used": os.environ.get("FAKE_NVIDIA_USED_MB", "120"),
         "fan.speed": "[N/A]", "pstate": "P0", "clocks_event_reasons.active": "0x0000000000000000"}
 for i in range(2):
     print(", ".join(str(i) if f == "index" else vals.get(f, "[N/A]").format(i=i) for f in fields))
