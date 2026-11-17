@@ -14,6 +14,15 @@ import json
 from pathlib import Path
 
 
+# A server that is already running somewhere else (another engine such as
+# Strata, or a llama-server you started yourself). The kit only sends it
+# requests: speed and offload need llama.cpp's own tools and are not offered.
+EXTERNAL = {"name": "external", "label": "External server (URL)", "external": True, "available": True,
+            "repo": "", "commit": "", "cuda_archs": "", "multi_gpu_split": "layer", "env": {},
+            "notes": "Benchmarks an OpenAI-compatible server that is already running (server and agent "
+                     "modules only). Results are marked not comparable."}
+
+
 def discover(engines_dir: Path) -> list[dict]:
     out = []
     for d in sorted(Path(engines_dir).glob("*/engine.json")):
@@ -27,7 +36,7 @@ def discover(engines_dir: Path) -> list[dict]:
         e.setdefault("env", {})
         e.setdefault("multi_gpu_split", "layer")
         out.append(e)
-    return out
+    return out + [dict(EXTERNAL)]
 
 
 SPLIT_MODES = ("layer", "tensor")

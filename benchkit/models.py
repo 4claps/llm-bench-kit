@@ -124,9 +124,14 @@ class ModelStore:
 
     def list(self) -> dict:
         standard = [self.status(m) for m in self.manifest]
-        known = {s["path"] for s in standard if s["path"]}
+        # Only a fully present standard model claims its files. Different quants can share a
+        # shard size (Unsloth's Flash-Next Q2 and Q4 have the same first and last shard), so a
+        # size match alone must not hide someone's custom model.
+        known: set[str] = set()
         for m in self.manifest:
-            known.update(str(p) for p in self.resolve(m) if p)
+            paths = self.resolve(m)
+            if all(paths):
+                known.update(str(p) for p in paths)
         custom = []
         for p in self._ggufs():
             shard = SHARD_RE.search(p.name)

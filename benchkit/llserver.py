@@ -86,3 +86,69 @@ class LlamaServer:
 
     def __exit__(self, *exc):
         self.stop()
+
+
+def probe_external(url: str, timeout: float = 5) -> tuple[bool, str, str]:
+    """(healthy, model id, message) for an already-running OpenAI-compatible server."""
+    base = url.rstrip("/").removesuffix("/v1")
+    try:
+        with urllib.request.urlopen(base + "/health", timeout=timeout) as r:
+            if r.status != 200:
+                return False, "", f"{base}/health answered {r.status}"
+    except (urllib.error.URLError, OSError) as e:
+        return False, "", f"{base}/health did not answer: {e}"
+    model = ""
+    try:
+        with urllib.request.urlopen(base + "/v1/models", timeout=timeout) as r:
+            data = (json.loads(r.read()) or {}).get("data") or []
+            model = str(data[0].get("id") or "") if data else ""
+    except (urllib.error.URLError, OSError, ValueError, AttributeError):
+        pass
+    return True, model, "ok"
+
+
+class ExternalServer:
+    """Same interface as LlamaServer for a server the kit did not start.
+
+    Nothing is launched or stopped. The server's model id is sent with every
+    request, because servers that host one model often still check it.
+    """
+
+    external = True
+
+    def __init__(self, ctx, *_, **__):
+        self.ctx = ctx
+        self.base = str(ctx.spec["server_url"]).rstrip("/").removesuffix("/v1")
+        self.model = ctx.spec.get("server_model") or ""
+
+    def start(self) -> None:
+        ok, model, msg = probe_external(self.base)
+        if not ok:
+            raise RuntimeError(f"external server not reachable: {msg}")
+        self.model = self.model or model
+        self.ctx.log("runner", f"using external server {self.base} (model {self.model or 'unknown'})")
+
+    def chat(self, body: dict, timeout: float = 1800) -> dict:
+        body = {**body, **({"model": self.model} if self.model else {})}
+        req = urllib.request.Request(self.base + "/v1/chat/completions", data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read())
+
+    def stop(self) -> None:
+        pass
+
+    def __enter__(self):
+        self.start()
+        return self
+
+    def __exit__(self, *exc):
+        pass
+
+
+def open_server(ctx, extra_args: list[str], ctx_size: int, mtp: bool = False,
+                record: tuple[str, str] | None = None):
+    """The run's server: an external one if the run uses the external engine, else our llama-server."""
+    if ctx.engine.get("external"):
+        return ExternalServer(ctx)
+    return LlamaServer(ctx, extra_args, ctx_size, mtp=mtp, record=record)

@@ -65,7 +65,7 @@ async def system(request: Request, refresh: int = 0):
         "kit_version": st.kit_version,
         "snapshot": snap,
         "engines": [{k: e.get(k) for k in ("name", "label", "commit", "cuda_archs", "multi_gpu_split",
-                                            "available", "notes")} | {"mtp": bool(e.get("mtp_args"))}
+                                            "available", "notes")} | {"mtp": bool(e.get("mtp_args")), "external": bool(e.get("external"))}
                     for e in st.runner.engines],
         "modules": [MODULES[n].describe() for n in MODULE_ORDER],
         "metrics": METRICS,
