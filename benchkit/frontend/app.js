@@ -212,6 +212,7 @@ async function viewRun(_, gen = state.gen) {
       <label class="field" style="flex:2"><span>Model</span><select id="r-model">${opts || "<option value=''>no models yet: see Models</option>"}</select></label>
       <label class="field"><span>Engine</span><select id="r-engine">${engines.map((e) => `<option value="${esc(e.name)}">${esc(e.label || e.name)}</option>`).join("")}</select></label>
       <label class="field"><span>Multi-GPU split</span><select id="r-split"><option value="">engine default</option><option>layer</option><option>tensor</option></select></label>
+      <label class="field"><span>GPU layers (-ngl)</span><input type="number" id="r-ngl" min="0" max="999" placeholder="all (default)"></label>
       <label class="field" style="flex:1"><span>Label (optional)</span><input type="text" id="r-label" maxlength="120"></label>
     </div>
     <div class="row" id="r-ext" hidden>
@@ -285,7 +286,7 @@ function isExternal() {
 function syncEngine() {
   const ext = isExternal();
   $("#r-ext").hidden = $("#r-ext-note").hidden = !ext;
-  $("#r-model").disabled = $("#r-split").disabled = ext;
+  $("#r-model").disabled = $("#r-split").disabled = $("#r-ngl").disabled = ext;
   for (const el of $$(".module")) {
     if (!["speed", "offload"].includes(el.dataset.mod)) continue;
     const box = $(".mod-on", el);
@@ -302,7 +303,8 @@ function collectSpec(forPreset = false) {
     modules[name] = Object.fromEntries(Object.entries(desc.params).map(([k, s]) => [k, readParam(name, k, s)]));
   }
   const abort_on = [$("#g-low").checked && "low_clock", $("#g-thermal").checked && "thermal"].filter(Boolean);
-  return { model: $("#r-model").value, engine: $("#r-engine").value, split: $("#r-split").value, label: forPreset ? "" : $("#r-label").value,
+  return { model: $("#r-model").value, engine: $("#r-engine").value, split: $("#r-split").value,
+    ngl: $("#r-ngl").value === "" ? null : parseInt($("#r-ngl").value, 10), label: forPreset ? "" : $("#r-label").value,
     gpus: $$("#r-gpus input:checked").map((i) => +i.value), modules, abort_on,
     power_cap: $("#pc-change").checked && $("input[name=pc]:checked") ? +$("input[name=pc]:checked").value : null,
     ...(isExternal() ? { server_url: $("#r-url").value.trim(), server_model: $("#r-smodel").value.trim() } : {}) };
@@ -314,6 +316,7 @@ function applySpec(spec) {
   $("#r-url").value = spec.server_url || "";
   $("#r-smodel").value = spec.server_model || "";
   $("#r-split").value = spec.split || "";
+  $("#r-ngl").value = spec.ngl ?? "";
   $$("#r-gpus input").forEach((i) => (i.checked = (spec.gpus || []).includes(+i.value)));
   for (const el of $$(".module")) {
     const name = el.dataset.mod, p = (spec.modules || {})[name];
@@ -347,7 +350,7 @@ async function reviewRun() {
   box.innerHTML = `<div class="card">
     <h2>Confirm</h2>
     <dl class="kv"><dt>Model</dt><dd>${esc(r.spec.model)}</dd><dt>Engine</dt><dd>${esc(r.spec.engine)}${r.spec.server_url ? " at " + esc(r.spec.server_url) : ""}</dd>
-      <dt>GPUs</dt><dd>${esc(r.spec.gpus.join(", "))}${r.spec.gpus.length > 1 ? ", " + esc(r.spec.split) + " split" : ""}</dd><dt>Modules</dt><dd>${esc(Object.keys(r.spec.modules).join(", "))}</dd>
+      <dt>GPUs</dt><dd>${esc(r.spec.gpus.join(", "))}${r.spec.gpus.length > 1 ? ", " + esc(r.spec.split) + " split" : ""}${r.spec.ngl != null ? ", ngl " + esc(r.spec.ngl) : ""}</dd><dt>Modules</dt><dd>${esc(Object.keys(r.spec.modules).join(", "))}</dd>
       <dt>Power cap</dt><dd>${r.spec.power_cap ? esc(r.spec.power_cap + " W for this run, then back to " + powerCapText(state.system.snapshot, r.spec.gpus)) : esc(powerCapText(state.system.snapshot, r.spec.gpus) + " (unchanged)")}</dd>
       <dt>Estimated time</dt><dd>about ${esc(dur(r.estimate_s))} (rough)</dd></dl>
     ${pf.block.length ? `<h3 class="err">Blocked</h3><ul>${pf.block.map((b) => `<li class="err">${esc(b)}</li>`).join("")}</ul>` : ""}
@@ -506,7 +509,7 @@ async function viewDetail(id, gen = state.gen) {
   <div class="grid">
     <div class="card"><h2>Run</h2><dl class="kv">
       <dt>Model</dt><dd>${esc(spec.model)}${spec.comparable === false ? " (custom, not comparable)" : ""}</dd><dt>Engine</dt><dd>${esc(spec.engine)}${spec.server_url ? " at " + esc(spec.server_url) : ""}</dd>
-      <dt>GPUs</dt><dd>${esc((spec.gpus || []).join(", "))}${(spec.gpus || []).length > 1 && spec.split ? ", " + esc(spec.split) + " split" : ""}</dd><dt>Started</dt><dd>${esc(when(r.started_at))}</dd>
+      <dt>GPUs</dt><dd>${esc((spec.gpus || []).join(", "))}${(spec.gpus || []).length > 1 && spec.split ? ", " + esc(spec.split) + " split" : ""}${spec.ngl != null ? ", ngl " + esc(spec.ngl) : ""}</dd><dt>Started</dt><dd>${esc(when(r.started_at))}</dd>
       <dt>Finished</dt><dd>${esc(when(r.finished_at))}</dd><dt>Hardware</dt><dd>${esc(hwLine(snap))}</dd>
       <dt>Power cap</dt><dd>${esc(powerCapText(snap, spec.gpus) || "unknown")}${spec.power_cap ? " (set for this run)" : ""}</dd></dl>
       <div class="row" style="margin-top:10px">

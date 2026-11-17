@@ -146,7 +146,8 @@ def markdown(b: dict) -> str:
     lines = [f"# Bench run {run['id']}", "",
              f"- Hardware: {hardware_line(b.get('snapshot'))}",
              f"- Engine: {spec.get('engine')}; model: {spec.get('model')}; GPUs: {spec.get('gpus')}"
-             + (f" ({spec.get('split')} split)" if len(spec.get("gpus") or []) > 1 else ""),
+             + (f" ({spec.get('split')} split)" if len(spec.get("gpus") or []) > 1 else "")
+             + (f"; ngl {spec['ngl']}" if spec.get("ngl") is not None else ""),
              f"- Status: {run.get('status')}" + (" (marked invalid: " + str(run.get('invalid_reason')) + ")"
                                                  if run.get("invalid") else ""),
              f"- Power cap: {power_cap_text(b.get('snapshot'), spec.get('gpus')) or 'unknown'}"

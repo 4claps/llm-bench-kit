@@ -19,7 +19,7 @@ FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS engines
 ARG CUDA_ARCHS="60;61;70"
 ARG JOBS=""
 ARG UPSTREAM_COMMIT=79e2e74eb11022c1ba2e438df7f0ca2d4c10f8b6
-ARG KMIC_COMMIT=ae35056eba07a52dc85c91b035170013d5e46220
+ARG KMIC_COMMIT=bbad6fcfbf224d4445a89150155c7502d03d3ac1
 ENV CUDA_ARCHS=${CUDA_ARCHS} JOBS=${JOBS}
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git cmake ninja-build ca-certificates \

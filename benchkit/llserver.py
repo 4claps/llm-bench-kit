@@ -7,7 +7,7 @@ import time
 import urllib.error
 import urllib.request
 
-from .engines import env_for, split_args
+from .engines import env_for, ngl_args, split_args
 from .llama_log import parse_print_timing
 from .procs import Proc
 
@@ -21,7 +21,7 @@ class LlamaServer:
         self.port = ctx.cfg.server_port
         self.argv = [f"{e['bin_dir']}/llama-server", "-m", str(ctx.model_path),
                      "--host", "127.0.0.1", "--port", str(self.port),
-                     "-ngl", "99", "-fa", "on", "-c", str(ctx_size), "-np", "1", "--jinja",
+                     *ngl_args(ctx.spec), "-fa", "on", "-c", str(ctx_size), "-np", "1", "--jinja",
                      *split_args(e, ctx.gpus, ctx.spec.get("split")), *extra_args]
         if mtp:
             if not e.get("mtp_args"):
@@ -47,22 +47,26 @@ class LlamaServer:
     def start(self, timeout: float = 1200) -> None:
         self.ctx.log("runner", "starting llama-server: " + " ".join(self.argv))
         self.proc = Proc(self.argv, env=env_for(self.ctx.engine, self.ctx.gpus), on_line=self._on_line)
-        t0 = time.time()
-        while time.time() - t0 < timeout:
-            if self.ctx.abort.is_set():
-                raise RuntimeError("aborted")
-            if not self.proc.alive():
-                tail = "\n".join(self.proc.lines[-15:])
-                raise RuntimeError(f"llama-server exited during startup (rc={self.proc.p.returncode})\n{tail}")
-            try:
-                with urllib.request.urlopen(self.base + "/health", timeout=5) as r:
-                    if r.status == 200:
-                        self.ctx.log("runner", f"llama-server ready after {time.time() - t0:.0f}s")
-                        return
-            except (urllib.error.URLError, OSError):
-                pass
-            time.sleep(2)
-        raise RuntimeError("llama-server did not become healthy in time")
+        try:
+            t0 = time.time()
+            while time.time() - t0 < timeout:
+                if self.ctx.abort.is_set():
+                    raise RuntimeError("aborted")
+                if not self.proc.alive():
+                    tail = "\n".join(self.proc.lines[-15:])
+                    raise RuntimeError(f"llama-server exited during startup (rc={self.proc.p.returncode})\n{tail}")
+                try:
+                    with urllib.request.urlopen(self.base + "/health", timeout=5) as r:
+                        if r.status == 200:
+                            self.ctx.log("runner", f"llama-server ready after {time.time() - t0:.0f}s")
+                            return
+                except (urllib.error.URLError, OSError):
+                    pass
+                time.sleep(2)
+            raise RuntimeError("llama-server did not become healthy in time")
+        except BaseException:
+            self.stop()  # never leak the child if anything between launch and ready raises
+            raise
 
     def chat(self, body: dict, timeout: float = 1800) -> dict:
         req = urllib.request.Request(self.base + "/v1/chat/completions", data=json.dumps(body).encode(),

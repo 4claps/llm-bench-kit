@@ -258,3 +258,81 @@ def test_power_cap_text_and_gpu_fields():
     g = hw.parse_gpu_csv("0, Tesla P100-PCIE-16GB, GPU-x, 00000000:01:00.0, 580.1, 86.00.3B.00.01, 16384, "
                          "150.00, 125.00, 250.00, 250.00, 3, 3, 8, 16, 1328, 715")[0]
     assert (g["power_limit"], g["power_min_limit"], g["power_max_limit"], g["power_default_limit"]) == (150, 125, 250, 250)
+
+
+# ---------------- ngl (GPU layers) ----------------
+def test_ngl_args():
+    from benchkit.engines import ngl_args
+    assert ngl_args({}) == ["-ngl", "99"]
+    assert ngl_args({"ngl": None}) == ["-ngl", "99"]
+    assert ngl_args({"ngl": 0}) == ["-ngl", "0"]
+    assert ngl_args({"ngl": 44}) == ["-ngl", "44"]
+
+
+def _runner(env):
+    from benchkit.config import Config
+    from benchkit.db import DB
+    from benchkit.models import ModelStore
+    from benchkit.runner import Runner
+    cfg = Config()
+    return Runner(cfg, DB(cfg.db_path), ModelStore(cfg.models_dir, cfg.data_dir, cfg.manifest))
+
+
+def test_validate_ngl(env):
+    r = _runner(env)
+    base = {"model": "custom:tiny-custom.gguf", "engine": "fake", "gpus": [0], "modules": {"speed": {}}}
+    assert r.validate(base)["ngl"] is None
+    assert r.validate({**base, "ngl": ""})["ngl"] is None
+    assert r.validate({**base, "ngl": "44"})["ngl"] == 44
+    assert r.validate({**base, "ngl": 44})["ngl"] == 44
+    for bad in (-1, 1000, "abc", 44.5, "44.5", True, False):
+        with pytest.raises(ValueError):
+            r.validate({**base, "ngl": bad})
+
+
+# ---------------- procs ----------------
+def _pgid_gone(pgid: int) -> bool:
+    import os
+    import time
+    for _ in range(50):
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def test_proc_kill_kills_children_of_a_dead_leader():
+    from benchkit.procs import Proc
+    p = Proc(["sh", "-c", "sleep 300 & exit 0"])
+    assert p.wait(timeout=10) == 0  # the leader exits at once; the sleep lives on in its group
+    p.kill()
+    assert _pgid_gone(p.pid)
+
+
+def test_proc_kill_sigkills_group_when_leader_is_dead():
+    from benchkit.procs import Proc
+    # the leader exits at once; the background sleep inherits the ignored SIGTERM,
+    # so only the SIGKILL step (which must look at the group, not the leader) ends it
+    p = Proc(["sh", "-c", "trap '' TERM; sleep 300 & exit 0"])
+    assert p.wait(timeout=10) == 0
+    p.kill(grace=1)
+    assert _pgid_gone(p.pid)
+
+
+def test_proc_context_manager_kills_on_raise():
+    from benchkit.procs import Proc
+    with pytest.raises(RuntimeError):
+        with Proc(["sleep", "300"]) as p:
+            raise RuntimeError("boom")
+    assert not p.alive()
+
+
+def test_kill_all_kills_and_reports_tracked_procs():
+    from benchkit.procs import Proc, kill_all
+    p = Proc(["sleep", "300"])
+    killed = kill_all()
+    assert any(str(p.pid) in d and "sleep" in d for d in killed)
+    assert not p.alive()
+    assert kill_all() == []  # nothing left tracked and running

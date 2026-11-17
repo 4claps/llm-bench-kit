@@ -50,5 +50,12 @@ def split_args(engine: dict, gpus: list[int], override: str | None = None) -> li
     return ["-sm", mode, "-ts", "/".join("1" for _ in gpus)]
 
 
+def ngl_args(spec: dict) -> list[str]:
+    """GPU layers for a llama.cpp launch: the run's -ngl, or 99 (all
+    layers) when the spec leaves it unset."""
+    n = spec.get("ngl")
+    return ["-ngl", "99" if n is None else str(n)]
+
+
 def env_for(engine: dict, gpus: list[int]) -> dict:
     return {**engine.get("env", {}), "CUDA_VISIBLE_DEVICES": ",".join(str(g) for g in gpus)}

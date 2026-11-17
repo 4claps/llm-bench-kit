@@ -7,7 +7,7 @@ snapshot records RAM type, speed and populated slots next to the numbers.
 
 from __future__ import annotations
 
-from ..engines import env_for, split_args
+from ..engines import env_for, ngl_args, split_args
 from ..procs import Proc
 from .base import Module, load_s
 from .speed import metric_name, parse_bench_jsonl
@@ -45,12 +45,12 @@ class OffloadModule(Module):
         for rep in range(p["reps"]):
             ctx.progress(self.name, rep + 1, p["reps"], f"run {rep + 1}")
             ctx.cool_down()
-            argv = [f"{e['bin_dir']}/llama-bench", "-m", str(ctx.model_path), "-ngl", "99", "-fa", "1",
+            argv = [f"{e['bin_dir']}/llama-bench", "-m", str(ctx.model_path), *ngl_args(ctx.spec), "-fa", "1",
                     "-ot", "exps=CPU", "-t", str(threads), "-p", str(p["pp"]), "-n", str(p["tg"]),
                     "-r", str(p["samples"]), "-o", "jsonl", *split_args(e, ctx.gpus, ctx.spec.get("split"))]
             ctx.log("runner", "llama-bench: " + " ".join(argv))
-            proc = Proc(argv, env=env_for(e, ctx.gpus), on_line=lambda l: ctx.log("bench", l))
-            rc = proc.wait(timeout=3600, abort=ctx.abort)
+            with Proc(argv, env=env_for(e, ctx.gpus), on_line=lambda l: ctx.log("bench", l)) as proc:
+                rc = proc.wait(timeout=3600, abort=ctx.abort)
             if ctx.abort.is_set():
                 return
             rows = parse_bench_jsonl(proc.lines)

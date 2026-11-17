@@ -137,9 +137,9 @@ class AgentModule(Module):
                             "--quiet", "--max-turns", "30", "--accept-hooks", "--model", model_label]
                     t0 = time.time()
                     # graded on stdout only, like ab_eval (stderr carries warnings)
-                    proc = Proc(argv, env=env, cwd=str(work), preexec_uid=ctx.cfg.agent_uid, split_stderr=True,
-                                on_line=lambda l, tk=task: ctx.log("agent", f"[{tk}] {l}"))
-                    rc = proc.wait(timeout=p["task_timeout_s"], abort=ctx.abort)
+                    with Proc(argv, env=env, cwd=str(work), preexec_uid=ctx.cfg.agent_uid, split_stderr=True,
+                              on_line=lambda l, tk=task: ctx.log("agent", f"[{tk}] {l}")) as proc:
+                        rc = proc.wait(timeout=p["task_timeout_s"], abort=ctx.abort)
                     wall = round(time.time() - t0, 1)
                     if ctx.abort.is_set():
                         return

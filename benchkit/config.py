@@ -39,6 +39,8 @@ class Config:
     cooldown_c: float = field(default_factory=lambda: float(_env("BENCHKIT_COOLDOWN_C", "48")))
     cooldown_timeout_s: float = field(default_factory=lambda: float(_env("BENCHKIT_COOLDOWN_TIMEOUT_S", "600")))
     sample_interval_s: float = field(default_factory=lambda: float(_env("BENCHKIT_SAMPLE_INTERVAL_S", "1")))
+    # used VRAM on a selected GPU that blocks a run (and warns after one)
+    vram_busy_mib: float = field(default_factory=lambda: float(_env("BENCHKIT_VRAM_BUSY_MIB", "1024")))
 
     token: str = ""
 
