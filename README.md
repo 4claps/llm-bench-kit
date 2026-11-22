@@ -9,10 +9,12 @@ on another one:
 |---|---|---|---|
 | **Bundled llama.cpp** | the image's pinned llama.cpp builds, started on this machine's NVIDIA GPUs | speed, server, offload, agent | yes |
 | **Custom command** | any engine with an OpenAI-compatible server (vLLM, SGLang, ik_llama.cpp, TabbyAPI, Strata, Ollama...), started here from a command line you give | server, agent | yes, for the GPUs you tick |
-| **Remote server** | any OpenAI-compatible URL that is already running: another machine on your network or a hosted API, with an optional API key | server, agent | only for GPUs you tick on this machine; none for a server elsewhere |
+| **Remote server** | any OpenAI-compatible URL that is already running: another machine on your network or a hosted API, with an optional API key | server, agent | from that machine's Prometheus exporters if you give them; else only for GPUs you tick here |
 
 The bundled builds target P100, P40/P4 and V100 by default; set `CUDA_ARCHS`
-to build them for newer cards (for example `75;80;86;89`). For a remote
+to build them for newer cards (for example `75;80;86;89`). AMD GPUs are
+detected and monitored too (see [AMD GPUs](#amd-gpus)); run a ROCm or Vulkan
+build of your engine on them with the Custom command engine. For a remote
 server you don't need a GPU at all: see [Remote only](#remote-only-no-gpu).
 
 You open a web page, pick a model, an engine, which GPUs and which tests,
@@ -54,7 +56,8 @@ Open `http://<this-machine>:8090`, paste the token, then:
 
 1. **Models**: download a standard model, or verify one you already have.
    Existing files are found by size and checksum even if you renamed them.
-2. **New run**: pick model, engine, GPUs and modules, set the number of runs, **Review run**, **Start run**.
+2. **New run**: on the **This machine** tab pick engine, model and GPUs (or switch to the **Remote server**
+   tab and give a URL), pick modules, set the number of runs, **Review run**, **Start run**.
 3. Watch it on the live page. Close the browser if you like; the run keeps going.
 4. On the finished run, **Download result file** to share it (see `results/README.md`).
 
@@ -115,8 +118,15 @@ tools). Things to know:
   as `<task>.pp` and `<task>.tg`, plus `<task>.draft_accept` on Strata. The
   counters include everything the server did meanwhile, so keep other clients
   off it during a run; on Strata the request count is stored with each task.
-- For a server on another machine, leave the GPUs unticked: there is no
-  GPU telemetry, guardrails or cool-down. For one on this machine, tick the
+- For a server on another machine, leave the GPUs unticked. To still get
+  that machine's GPU, CPU and RAM charts and guardrails, list its Prometheus
+  exporters under **Telemetry exporters** (space-separated `/metrics` URLs):
+  node_exporter (`:9100`) for CPU and RAM (and AMD GPUs through its drm
+  collector), plus nvidia_gpu_exporter (`:9835`) or NVIDIA's DCGM exporter
+  (`:9400`) for NVIDIA GPUs. The result file then records that machine's
+  GPUs, CPU threads, RAM and kernel (no serials or UUIDs), and its hardware
+  line reads `remote: ...`. Without exporters there is no GPU telemetry,
+  guardrails or cool-down. For one on this machine, tick the
   GPUs it uses so telemetry and guardrails watch them (cool-down is still
   skipped, since a running server keeps its cards warm). If the server runs
   in another container, the host's LAN IP reaches it.
@@ -143,6 +153,23 @@ minutes. It runs inside the kit's container, so the engine has to be
 installed there, or run the kit [without Docker](#remote-only-no-gpu) next to
 your engines. Server and agent modules only; results are marked not
 comparable. The last command you used is remembered in your browser.
+
+### AMD GPUs
+
+AMD cards are read from the `amdgpu` driver's own sysfs files, so neither
+`rocm-smi` nor `amd-smi` is needed: name, VRAM, power cap and PCIe link for
+the run record, and temperature, clocks, power, utilization, VRAM and fan
+for the charts and guardrails. In a container, pass the cards through with
+`--device /dev/kfd --device /dev/dri`. On a machine with both kinds, the
+NVIDIA GPUs come first and the AMD ones are numbered on after them; a Custom
+command run gets `CUDA_VISIBLE_DEVICES` and `HIP_VISIBLE_DEVICES` for the
+cards you tick. The bundled llama.cpp builds and the power cap setting are
+NVIDIA only. Cards on the older `radeon` driver are not supported. On APUs
+and boards that share system RAM with the GPU (the BC-250, for example) the
+model sits in GTT, so the kit shows and charts that next to VRAM. A card
+that lacks a file simply goes without that reading: the BC-250 has no
+`gpu_busy_percent`, so it gets no utilization chart and no low-clock
+guardrail (that one needs utilization).
 
 ### Remote only (no GPU)
 

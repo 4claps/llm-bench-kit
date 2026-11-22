@@ -430,3 +430,82 @@ def test_fill_command_placeholders():
                     "--hf-overrides", '{"a": 1}']
     assert fill_command("srv --port {port} --devices {gpus} {model}", 1, "", 1, [2, 3]) == ["srv", "--port", "1", "--devices", "2,3"]
 
+
+EXPORTERS = Path(__file__).resolve().parent / "fakes" / "exporters"
+
+
+def test_nvidia_gpu_exporter_and_node_exporter_samples():
+    from benchkit import promtel
+    nv = promtel.parse_prom((EXPORTERS / "nvidia_gpu_exporter.prom").read_text())
+    g = promtel.nvidia_exporter_gpus(nv)
+    assert g["1"] == {"mem_mhz": 715.0, "sm_mhz": 1328.0, "power_w": 142.0, "temp_c": 71.0, "util_pct": 97.0,
+                      "vram_mb": 16091.0}
+    node = (EXPORTERS / "node_exporter.prom").read_text()
+    cpu, mem, prev = promtel.node_cpu_mem(promtel.parse_prom(node), None)
+    assert "util_pct" not in cpu and cpu["mhz"] == 1500 and cpu["temp_c"] == 55 and mem["avail_gb"] == 20.0
+    later = node.replace('mode="user"} 300', 'mode="user"} 330').replace('cpu="0",mode="idle"} 1000', 'cpu="0",mode="idle"} 1030')
+    cpu, _, _ = promtel.node_cpu_mem(promtel.parse_prom(later), prev)
+    assert cpu["util_pct"] == round(100 * 60 / 90, 1)  # 60 s busy (user on both CPUs) of 90 s
+
+
+def test_dcgm_and_drm_exporters():
+    from benchkit import promtel
+    d = promtel.dcgm_gpus(promtel.parse_prom((EXPORTERS / "dcgm_exporter.prom").read_text()))
+    assert d == {"0": {"sm_mhz": 2040.0, "mem_mhz": 6250.0, "temp_c": 64.0, "power_w": 70.5, "util_pct": 99.0,
+                       "vram_mb": 20563.0}}
+    a = promtel.drm_gpus(promtel.parse_prom((EXPORTERS / "node_exporter_amd.prom").read_text()))
+    assert a == {"0": {"util_pct": 87.0, "vram_mb": 8192.0}}
+
+
+def _fake_amd_card(sysfs, n, slot, busy=40, vram_total=16 * 2**30, dpm_only=False):
+    import os
+    dev = sysfs / "devices" / f"0000:{slot}:00.0"
+    hw = dev / "hwmon" / f"hwmon{n + 5}"
+    hw.mkdir(parents=True)
+    files = {dev / "vendor": "0x1002", dev / "device": "0x73bf", dev / "product_name": "AMD Radeon Test",
+             dev / "gpu_busy_percent": busy, dev / "mem_busy_percent": 7, dev / "mem_info_vram_total": vram_total,
+             dev / "mem_info_vram_used": 3 * 2**30, dev / "current_link_width": 8, dev / "max_link_width": 16,
+             dev / "mem_info_gtt_total": 32 * 2**30, dev / "mem_info_gtt_used": 2**30,
+             dev / "pp_dpm_sclk": "0: 500Mhz\n1: 2100Mhz *\n", dev / "pp_dpm_mclk": "0: 96Mhz\n1: 1000Mhz *\n",
+             hw / "temp1_input": 65000, hw / "power1_average": 180500000, hw / "power1_cap": 250000000, hw / "pwm1": 128}
+    if not dpm_only:
+        files.update({hw / "freq1_input": 2050000000, hw / "freq2_input": 1000000000})
+    for f, v in files.items():
+        f.write_text(f"{v}\n")
+    card = sysfs / "class" / "drm" / f"card{n}"
+    card.mkdir(parents=True, exist_ok=True)
+    os.symlink(dev, card / "device")
+    (sysfs / "class" / "drm" / f"card{n}-DP-1").mkdir()  # a connector, not a GPU
+
+
+def test_amdgpu_sysfs(tmp_path, monkeypatch):
+    from benchkit import amdgpu
+    sysfs = tmp_path / "sys"
+    _fake_amd_card(sysfs, 1, "0b")
+    _fake_amd_card(sysfs, 0, "0a", busy=99, dpm_only=True)
+    monkeypatch.setenv("BENCHKIT_SYSFS_ROOT", str(sysfs))
+    snap = amdgpu.snapshot_gpus()
+    assert [(g["index"], g["pci_bus_id"], g["memory_total"], g["power_limit"]) for g in snap] == \
+        [(0, "0000:0a:00.0", 16384, 250.0), (1, "0000:0b:00.0", 16384, 250.0)]
+    assert snap[0]["pcie_link_width_current"] == 8 and snap[0]["name"] == "AMD Radeon Test"
+    assert snap[0]["gtt_total"] == 32768
+    s = amdgpu.sample_gpus()
+    assert s["0"] == {"temp_c": 65.0, "power_w": 180.5, "fan_pct": 50, "sm_mhz": 2100.0, "mem_mhz": 1000.0,
+                      "util_pct": 99, "mem_util_pct": 7, "vram_mb": 3072, "gtt_mb": 1024}
+    assert s["1"]["sm_mhz"] == 2050 and s["1"]["util_pct"] == 40
+
+
+def test_mixed_nvidia_and_amd(env):
+    import os
+    from pathlib import Path
+    from benchkit import hw
+    from benchkit.telemetry import Sampler
+    _fake_amd_card(Path(os.environ["BENCHKIT_SYSFS_ROOT"]), 0, "0a")
+    snap = hw.snapshot()
+    assert [(g["index"], g["vendor"], g["vendor_index"]) for g in snap["gpus"]] == \
+        [(0, "NVIDIA", 0), (1, "NVIDIA", 1), (2, "AMD", 0)]
+    assert snap["gpu_vendor"] == "AMD+NVIDIA"
+    assert hw.visible_devices_env(snap["gpus"], [1, 2]) == {"CUDA_VISIBLE_DEVICES": "1", "HIP_VISIBLE_DEVICES": "0"}
+    assert hw.visible_devices_env(snap["gpus"], [2]) == {"HIP_VISIBLE_DEVICES": "0"}
+    assert set(Sampler().sample()["gpus"]) == {"0", "1", "2"}
+

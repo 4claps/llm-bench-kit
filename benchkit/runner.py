@@ -27,6 +27,7 @@ from .guardrails import Guardrails
 from .llserver import probe_external
 from .models import ModelStore
 from .modules import MODULE_ORDER, MODULES
+from .promtel import RemoteSampler
 from .telemetry import Sampler
 
 KIT_VERSION = "0.1.0"
@@ -180,6 +181,14 @@ class Runner:
             if not ok:
                 raise ValueError(f"server not reachable: {msg}")
             server_model = str(spec.get("server_model") or "").strip()[:200] or server_model
+        telemetry_urls, remote_gpus = [], []
+        if engine.get("external") and spec.get("telemetry_urls"):
+            raw = spec["telemetry_urls"]
+            raw = raw.replace(",", " ").split() if isinstance(raw, str) else list(raw)
+            telemetry_urls = [str(u).strip() for u in raw if str(u).strip()][:4]
+            if any(not u.startswith(("http://", "https://")) for u in telemetry_urls):
+                raise ValueError("telemetry URLs must look like http://10.0.0.5:9100/metrics")
+            remote_gpus = [g["index"] for g in RemoteSampler(telemetry_urls).snapshot()["gpus"]]
         if engine.get("command"):
             launch_cmd = str(spec.get("launch_cmd") or "").strip()
             if not launch_cmd or "{port}" not in launch_cmd:
@@ -240,6 +249,8 @@ class Runner:
         power_cap = spec.get("power_cap")
         if power_cap not in (None, "") and not gpus:
             raise ValueError("a power cap needs GPUs ticked")
+        if power_cap not in (None, "") and "AMD" in hw.by_vendor(self.snapshot().get("gpus") or [], gpus):
+            raise ValueError("the power cap can only be changed on NVIDIA GPUs for now")
         if power_cap not in (None, ""):
             try:
                 power_cap = int(power_cap)
@@ -260,6 +271,7 @@ class Runner:
                 "label": str(spec.get("label") or "")[:120], "comparable": comparable, "power_cap": power_cap,
                 "ngl": ngl,
                 **({"server_url": server_url, "server_model": server_model} if engine.get("external") else {}),
+                **({"telemetry_urls": telemetry_urls, "remote_gpus": remote_gpus} if telemetry_urls else {}),
                 **({"launch_cmd": launch_cmd, "server_model": server_model} if engine.get("command") else {})}
 
     def estimate(self, spec: dict) -> int:
@@ -288,11 +300,18 @@ class Runner:
             ok, _, msg = probe_external(spec["server_url"], key=self._keys.get(spec.get("_run_id", ""), ""))
             if not ok:
                 block.append(f"server not reachable: {msg}")
-            if spec["gpus"]:
+            if spec.get("telemetry_urls"):
+                rs = RemoteSampler(spec["telemetry_urls"]).snapshot()
+                for u, e in rs["errors"].items():
+                    warn.append(f"telemetry exporter {u} did not answer: {e}")
+                if not rs["gpus"]:
+                    warn.append("the exporters list no GPUs: CPU and RAM telemetry only")
+            elif spec["gpus"]:
                 warn.append("remote server: GPU telemetry and guardrails watch the GPUs ticked here, so tick only "
                             "the ones that server runs on, on this machine")
             else:
-                warn.append("remote server with no local GPUs ticked: no GPU telemetry, guardrails or cool-down")
+                warn.append("remote server with no local GPUs ticked and no exporter URLs: no GPU telemetry or "
+                            "guardrails")
         if command:
             warn.append("custom command: the kit runs your command as is; results are marked not comparable")
             if not spec["gpus"]:
@@ -312,7 +331,11 @@ class Runner:
             if busy:
                 block.append("selected GPUs are in use by other processes: " + "; ".join(busy)[:300])
         if not snap.get("gpus") and spec["gpus"]:
-            block.append("no NVIDIA GPUs visible (start the container with --gpus all)")
+            block.append("no GPUs visible (NVIDIA: start the container with --gpus all; AMD: "
+                         "--device /dev/kfd --device /dev/dri)")
+        if not external and not command and "AMD" in hw.by_vendor(snap.get("gpus") or [], spec["gpus"]):
+            block.append("the bundled llama.cpp builds are CUDA only: pick NVIDIA GPUs, or run a ROCm or Vulkan "
+                         "build of your engine with the Custom command engine")
         free = shutil.disk_usage(self.cfg.data_dir).free
         if free < 5e9:
             warn.append(f"only {free / 1e9:.1f} GB free in the data dir")
@@ -335,11 +358,16 @@ class Runner:
 
     # ---------------- run ----------------
     def _used_vram(self) -> dict[int, float]:
-        """memory.used (MiB) per GPU index from nvidia-smi; {} if unavailable."""
+        """VRAM used (MiB) per kit GPU index: nvidia-smi, then AMD cards numbered on after the NVIDIA ones."""
+        from . import amdgpu
         ok, out = hw.run_cmd(["nvidia-smi", "--query-gpu=index,memory.used", "--format=csv,noheader,nounits"])
-        if not ok:
-            return {}
         used: dict[int, float] = {}
+        for k, g in (amdgpu.sample_gpus() if amdgpu.cards() else {}).items():
+            if "vram_mb" in g:
+                used[int(k)] = float(g["vram_mb"])  # renumbered below once the NVIDIA count is known
+        if not ok:
+            return used
+        amd, used = used, {}
         for line in out.strip().splitlines():
             parts = [p.strip() for p in line.split(",")]
             v = hw._num(parts[1]) if len(parts) == 2 else None
@@ -348,6 +376,8 @@ class Runner:
                     used[int(parts[0])] = float(v)
                 except ValueError:
                     continue
+        n = len(used)
+        used.update({n + k: v for k, v in amd.items()})
         return used
 
     def create(self, spec_in: dict) -> dict:
@@ -373,6 +403,8 @@ class Runner:
                 raise ValueError("preflight blocked: " + "; ".join(pf["block"]))
             restore = self._apply_power_cap(spec)
             snap = self.snapshot(refresh=bool(restore))  # so the run records the cap it ran at
+            if spec.get("telemetry_urls"):  # the machine that does the work, from its exporters
+                snap = {**snap, "remote": RemoteSampler(spec["telemetry_urls"]).snapshot()}
             path = self._model_file(spec)
             ctx = RunContext(self, run_id, spec, self.engine(spec["engine"]), path,
                              self.store.get(spec["model"]) if path else None, snap)
@@ -381,7 +413,8 @@ class Runner:
             self.active = ctx
             self.db.update_run(run_id, status="running", started_at=time.time(),
                                snapshot_json=json.dumps(snap))
-        threading.Thread(target=self._sample_loop, args=(ctx,), daemon=True, name="sampler").start()
+        ctx.sampler_thread = threading.Thread(target=self._sample_loop, args=(ctx,), daemon=True, name="sampler")
+        ctx.sampler_thread.start()
         threading.Thread(target=self._work, args=(ctx,), daemon=True, name="worker").start()
         self.emit({"type": "status", "run_id": run_id, "status": "running"})
 
@@ -452,6 +485,9 @@ class Runner:
             except Exception:  # noqa: BLE001
                 ctx.log("runner", traceback.format_exc())
             self._restore_power_cap(ctx.power_restore, ctx)
+            st = getattr(ctx, "sampler_thread", None)
+            if st:  # its last samples are saved before the run counts as finished
+                st.join(timeout=15)
             ctx.flush_logs()
             self.db.update_run(ctx.run_id, status=status, finished_at=time.time(), error=error)
             self.active = None
@@ -459,7 +495,8 @@ class Runner:
             self.emit({"type": "status", "run_id": ctx.run_id, "status": status, "error": error})
 
     def _sample_loop(self, ctx: RunContext) -> None:
-        sampler = Sampler()
+        remote = bool(ctx.spec.get("telemetry_urls"))
+        sampler = RemoteSampler(ctx.spec["telemetry_urls"]) if remote else Sampler()
         guard = Guardrails(self.cfg.busy_util_pct, self.cfg.low_clock_mhz, self.cfg.thermal_warn_c,
                            self.cfg.guardrail_sustain_s)
         abort_on = ctx.spec.get("abort_on") or []
@@ -468,7 +505,8 @@ class Runner:
         while not ctx.abort.is_set():
             t0 = time.time()
             s = sampler.sample()
-            s["gpus"] = {k: v for k, v in s["gpus"].items() if int(k) in ctx.gpus}
+            if not remote:  # a remote box's exporters already list only its own GPUs
+                s["gpus"] = {k: v for k, v in s["gpus"].items() if int(k) in ctx.gpus}
             s["server"] = dict(ctx.server_live)
             batch.append(s)
             self.emit({"type": "telemetry", "run_id": ctx.run_id, "sample": s})

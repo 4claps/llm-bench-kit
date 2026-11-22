@@ -83,3 +83,11 @@ td.best { font-weight: 700; color: var(--ok); }
 .uplot { width: 100% !important; }
 @media (max-width: 600px) { main { padding: 10px; } .card { padding: 10px; } }
 .strong { font-weight: 600; }
+
+.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin-bottom: 14px; }
+.tab { background: none; color: var(--muted); border-radius: 6px 6px 0 0; padding: 9px 16px; border-bottom: 2px solid transparent;
+       margin-bottom: -1px; font-weight: 500; }
+.tab:hover { color: var(--text); }
+.tab[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+details summary { cursor: pointer; }
+[hidden] { display: none !important; }

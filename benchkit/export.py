@@ -130,6 +130,8 @@ def power_cap_text(snap: dict | None, gpus: list[int] | None = None) -> str:
 def hardware_line(snap: dict | None) -> str:
     if not snap:
         return "unknown hardware"
+    if snap.get("remote"):  # a remote server's run: the box that did the work, from its exporters
+        return "remote: " + hardware_line({k: v for k, v in snap["remote"].items() if k != "remote"})
     gpus = snap.get("gpus") or []
     names: dict = defaultdict(int)
     for g in gpus:
