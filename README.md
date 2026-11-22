@@ -30,6 +30,8 @@ a history you can compare, mark invalid, and export.
 | **RAM offload** | MoE expert layers in system RAM (`-ot exps=CPU`); decode is then bound by RAM bandwidth, so this separates DDR3 from DDR4 boxes | 5–10 min |
 | **Agent** | the Hermes agent tool-use battery (trap tasks from hermes-agent's `toolperf_abeval`, MIT); pass rate and wall time per task, plus prompt processing (prefill) and decode t/s | ~2 min per task per run |
 
+What each test measures, and what every agent task is checking for: [docs/WHAT-IT-TESTS.md](docs/WHAT-IT-TESTS.md).
+
 Every test cools the GPUs to 48 °C before it starts and records GPU
 temperature, SM and memory clocks, power, utilization, VRAM, PCIe link, CPU
 load, clock, temperature and package power, RAM and fan speeds once a second.
