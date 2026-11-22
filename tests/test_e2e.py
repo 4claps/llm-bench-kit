@@ -2,6 +2,7 @@
 create (validation + preflight), start, wait, results, export, import,
 compare, invalid marking, delete."""
 
+import json
 import os
 import time
 
@@ -44,7 +45,7 @@ def test_speed_and_server_run(env):
         login(c)
         sysinfo = c.get("/api/system").json()
         assert len(sysinfo["snapshot"]["gpus"]) == 2
-        assert [e["name"] for e in sysinfo["engines"]] == ["fake", "external"]
+        assert [e["name"] for e in sysinfo["engines"]] == ["fake", "external", "command"]
         models = c.get("/api/models").json()
         mid = models["custom"][0]["id"]
 
@@ -251,4 +252,68 @@ def test_agent_external_server_records_prefill_decode(env):
             assert tp["prompt"]["n"] == 2 and tp["gen"]["avg"] == pytest.approx(26.0, rel=0.01)
     finally:
         srv.kill()
+
+
+def _fake_server(*args):
+    import subprocess
+    import sys
+    from pathlib import Path
+    fake = Path(__file__).resolve().parent / "fakes" / "engines" / "fake" / "bin" / "llama-server"
+    port = 19100 + (os.getpid() + len(args) * 7) % 300
+    return subprocess.Popen([sys.executable, str(fake), "--port", str(port), *args], stdout=subprocess.DEVNULL), port
+
+
+def test_remote_server_without_gpus_and_with_key(env):
+    srv, port = _fake_server("--no-timings", "--api-key", "s3cret-key")
+    try:
+        url = f"http://127.0.0.1:{port}/v1"
+        with make_client() as c:
+            login(c)
+            for _ in range(50):  # wait for the fake; without the key it is refused
+                r = c.post("/api/remote/models", json={"url": url, "key": "s3cret-key"})
+                if r.status_code == 200:
+                    break
+                time.sleep(0.1)
+            assert r.json() == {"models": ["fake"]}
+            bad = c.post("/api/remote/models", json={"url": url, "key": "wrong"})
+            assert bad.status_code == 400 and "API key" in bad.json()["detail"]
+            assert c.post("/api/runs", json={"engine": "external", "server_url": url, "gpus": [],
+                                             "modules": {"server": {"reps": 1}}}).status_code == 400  # no key
+            r = c.post("/api/runs", json={"engine": "external", "server_url": url, "server_key": "s3cret-key", "gpus": [],
+                                          "modules": {"server": {"reps": 1, "max_tokens": 64}}}).json()
+            assert not r["preflight"]["block"], r["preflight"]
+            assert any("no local GPUs" in w for w in r["preflight"]["warn"])
+            assert c.post(f"/api/runs/{r['id']}/start").status_code == 200
+            assert wait_done(c, r["id"]) == "done"
+            d = c.get(f"/api/runs/{r['id']}").json()
+            res = {x["metric"]: x for x in d["results"] if x["module"] == "server"}
+            assert res["prose.pp"]["value"] > 0 and res["code.tg"]["value"] > 0
+            assert res["prose.tg"]["extra"]["method"] == "stream"
+            everything = json.dumps(d) + c.get(f"/api/runs/{r['id']}/export.json").text
+            assert "s3cret-key" not in everything  # the key is never stored or exported
+    finally:
+        srv.kill()
+
+
+def test_custom_command_engine_starts_and_stops_server(env):
+    import sys
+    from benchkit.procs import kill_all
+    from pathlib import Path
+    fake = Path(__file__).resolve().parent / "fakes" / "engines" / "fake" / "bin" / "llama-server"
+    with make_client() as c:
+        login(c)
+        bad = c.post("/api/runs", json={"engine": "command", "launch_cmd": "srv --no-port", "gpus": [0],
+                                        "modules": {"server": {}}})
+        assert bad.status_code == 400 and "{port}" in bad.json()["detail"]
+        r = c.post("/api/runs", json={"engine": "command", "launch_cmd": f"{sys.executable} {fake} --port {{port}}",
+                                      "gpus": [0], "modules": {"server": {"reps": 1, "max_tokens": 64}}}).json()
+        assert r["spec"]["model"] == "command: named by the command" and r["spec"]["comparable"] is False
+        assert not r["preflight"]["block"], r["preflight"]
+        assert c.post(f"/api/runs/{r['id']}/start").status_code == 200
+        assert wait_done(c, r["id"]) == "done"
+        d = c.get(f"/api/runs/{r['id']}").json()
+        res = {(x["variant"], x["metric"]): x for x in d["results"] if x["module"] == "server"}
+        assert res[("command", "prose.pp")]["value"] == 380.0 and res[("command", "prose.pp")]["extra"]["method"] == "server"
+        assert res[("command", "code.tg")]["value"] == 26.0
+    assert kill_all() == []  # the server the command started is gone
 

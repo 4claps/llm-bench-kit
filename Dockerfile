@@ -1,9 +1,9 @@
-# P100 bench kit: web app + pinned llama.cpp engines + Hermes agent battery.
+# LLM bench kit: web app + pinned llama.cpp engines + Hermes agent battery.
 #
-#   docker build -t p100-bench-kit .
+#   docker build -t llm-bench-kit .
 #   docker run -d --name bench --gpus all -p 8090:8090 \
 #     -v /sys/firmware/dmi/tables:/host-dmi:ro \
-#     -v /path/to/models:/models -v bench-data:/data p100-bench-kit
+#     -v /path/to/models:/models -v bench-data:/data llm-bench-kit
 #
 # Build args: CUDA_ARCHS (default 60;61;70 = P100, P40/P4, V100) for the upstream
 # engine, KMIC_CUDA_ARCHS (default 60, P100 only), JOBS.

@@ -1,0 +1,39 @@
+# LLM bench kit, remote-only image: the web app and the Hermes agent battery, no CUDA and no llama.cpp builds.
+# Benchmarks OpenAI-compatible servers elsewhere (Remote server engine), or engines installed in a derived image
+# (Custom command engine). Builds in a couple of minutes on any machine; no GPU needed.
+#
+#   docker build -f Dockerfile.lite -t llm-bench-kit:lite .
+#   docker run -d --name bench -p 8090:8090 -v bench-data:/data llm-bench-kit:lite
+ARG UV_VERSION=0.12.23
+FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
+
+FROM python:3.12-slim
+# keep in step with the main Dockerfile, so agent results match
+ARG HERMES_COMMIT=4a3e5c4094d96c2e184dead99bccb4f4aabb2e1b
+COPY --from=uv /uv /usr/local/bin/uv
+ENV UV_LINK_MODE=copy UV_COMPILE_BYTECODE=1 UV_PYTHON_DOWNLOADS=never
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates pciutils \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -m -u 1000 bench
+RUN uv venv -p /usr/local/bin/python3 /opt/benchkit-venv
+COPY requirements.txt /tmp/requirements.txt
+RUN uv pip install -p /opt/benchkit-venv/bin/python -r /tmp/requirements.txt
+RUN git init -q /opt/hermes-agent \
+    && git -C /opt/hermes-agent remote add origin https://github.com/NousResearch/hermes-agent \
+    && git -C /opt/hermes-agent fetch -q --depth 1 origin "$HERMES_COMMIT" \
+    && git -C /opt/hermes-agent checkout -q FETCH_HEAD \
+    && rm -rf /opt/hermes-agent/.git
+RUN cd /opt/hermes-agent && UV_PROJECT_ENVIRONMENT=/opt/hermes-venv uv sync --frozen --no-dev -p /usr/local/bin/python3
+COPY benchkit /opt/benchkit/benchkit
+COPY models /opt/benchkit/models
+COPY README.md LICENSE /opt/benchkit/
+RUN mkdir -p /opt/engines
+ENV BENCHKIT_DATA_DIR=/data BENCHKIT_MODELS_DIR=/models BENCHKIT_ENGINES_DIR=/opt/engines \
+    BENCHKIT_HERMES_PYTHON=/opt/hermes-venv/bin/python BENCHKIT_HERMES_SOURCE=/opt/hermes-agent \
+    BENCHKIT_MANIFEST=/opt/benchkit/models/manifest.yaml PYTHONUNBUFFERED=1
+WORKDIR /opt/benchkit
+VOLUME ["/data"]
+EXPOSE 8090
+HEALTHCHECK --interval=30s --timeout=5s CMD /opt/benchkit-venv/bin/python -c \
+  "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/healthz', timeout=4)"
+CMD ["/opt/benchkit-venv/bin/python", "-m", "benchkit.main"]

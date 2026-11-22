@@ -397,3 +397,36 @@ def test_fetch_counters_from_fake_server():
         srv.kill()
 
 
+
+def test_external_key_file(tmp_path, monkeypatch):
+    from benchkit.llserver import auth_headers as external_headers, external_key
+    monkeypatch.setenv("BENCHKIT_DATA_DIR", str(tmp_path))
+    monkeypatch.delenv("BENCHKIT_EXTERNAL_KEY_FILE", raising=False)
+    assert external_key() == "" and external_headers() == {}
+    (tmp_path / "external_api_key").write_text("abc123\n")
+    assert external_headers() == {"Authorization": "Bearer abc123"}
+
+
+def test_stream_rates_server_timings_then_arrival_timing():
+    from benchkit.llserver import stream_rates
+    m = {"ttft": 0.5, "gen_s": 2.0, "chunks": 101, "usage": {"prompt_tokens": 1000, "completion_tokens": 101},
+         "timings": {"prompt_n": 1000, "prompt_per_second": 900.0, "predicted_n": 101, "predicted_per_second": 55.0,
+                     "draft_n": 80, "draft_n_accepted": 60}}
+    r = stream_rates(m)
+    assert (r["method"], r["pp"], r["tg"], r["draft_n"], r["draft_accepted"]) == ("server", 900.0, 55.0, 80, 60)
+    r = stream_rates({**m, "timings": None})  # vLLM, Ollama, hosted APIs: arrival timing
+    assert (r["method"], r["pp"], r["tg"]) == ("stream", 2000.0, 50.0)
+    r = stream_rates({**m, "timings": None, "usage": {"prompt_tokens": 1000, "completion_tokens": 101,
+                                                     "prompt_tokens_details": {"cached_tokens": 800}}})
+    assert (r["pp"], r["cached"]) == (400.0, 800)  # only the 200 new tokens count as read
+    assert stream_rates({"ttft": None, "gen_s": None, "chunks": 0, "usage": {}, "timings": None})["tg"] is None
+
+
+def test_fill_command_placeholders():
+    from benchkit.llserver import fill_command
+    argv = fill_command('vllm serve {model} --port {port} --max-model-len {ctx} --hf-overrides \'{"a": 1}\'',
+                        8099, "/models/my model.gguf", 32768, [0, 1])
+    assert argv == ["vllm", "serve", "/models/my model.gguf", "--port", "8099", "--max-model-len", "32768",
+                    "--hf-overrides", '{"a": 1}']
+    assert fill_command("srv --port {port} --devices {gpus} {model}", 1, "", 1, [2, 3]) == ["srv", "--port", "1", "--devices", "2,3"]
+

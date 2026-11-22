@@ -26,8 +26,8 @@ class OffloadModule(Module):
     }
 
     def check(self, p, model, engine, snapshot):
-        if engine.get("external"):
-            return ["needs llama.cpp's own tools, so it can't run against an external server"]
+        if engine.get("requests_only"):
+            return ["needs the bundled llama.cpp builds, not a remote server or a custom command"]
         probs = []
         if model is not None and model.get("kind") != "moe":
             probs.append("offload needs a MoE model (for example Qwen3.6-35B-A3B)")

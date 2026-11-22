@@ -12,7 +12,10 @@ import time
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
+import urllib.error
+
 from . import export, hw
+from .llserver import list_models
 from .modules import MODULE_ORDER, MODULES
 from .telemetry import DEFAULT_CHARTS, METRICS
 
@@ -65,7 +68,8 @@ async def system(request: Request, refresh: int = 0):
         "kit_version": st.kit_version,
         "snapshot": snap,
         "engines": [{k: e.get(k) for k in ("name", "label", "commit", "cuda_archs", "multi_gpu_split",
-                                            "available", "notes")} | {"mtp": bool(e.get("mtp_args")), "external": bool(e.get("external"))}
+                                            "available", "notes")} | {"mtp": bool(e.get("mtp_args")), "external": bool(e.get("external")), "command": bool(e.get("command")),
+                       "requests_only": bool(e.get("requests_only"))}
                     for e in st.runner.engines],
         "modules": [MODULES[n].describe() for n in MODULE_ORDER],
         "metrics": METRICS,
@@ -100,6 +104,23 @@ async def model_verify(request: Request, model_id: str):
         raise HTTPException(404, "unknown model")
     except RuntimeError as e:
         raise HTTPException(409, str(e))
+
+
+# ---------------- remote servers ----------------
+@router.post("/remote/models")
+async def remote_models(request: Request):
+    """The model ids a remote OpenAI-compatible server offers (for the New Run picker). The key is used for
+    this one request and not kept."""
+    b = await body(request)
+    url, key = str(b.get("url") or "").strip(), str(b.get("key") or "").strip()
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(400, "give a server URL such as http://10.0.0.5:8080/v1")
+    try:
+        return {"models": await asyncio.to_thread(list_models, url, key)}
+    except urllib.error.HTTPError as e:
+        raise HTTPException(400, f"/v1/models answered {e.code}" + (" (wrong or missing API key?)" if e.code in (401, 403) else ""))
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        raise HTTPException(400, f"could not reach the server: {getattr(e, 'reason', e)}")
 
 
 # ---------------- runs ----------------

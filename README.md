@@ -1,9 +1,19 @@
-# P100 Bench Kit
+# LLM Bench Kit
 
-One Docker image that benchmarks LLM inference on your NVIDIA GPUs and
-produces a result file you can share. It is built for Tesla P100s but runs
-on anything the bundled llama.cpp builds support (P100, P40/P4, V100; set
-`CUDA_ARCHS` to add more).
+A web app that benchmarks LLM inference and produces a result file you can
+share. It started on Tesla P100s (they are still the reference hardware for
+the bundled builds), but it runs any engine and any model, on this machine or
+on another one:
+
+| Target | What it is | Modules | Telemetry, guardrails, cool-down |
+|---|---|---|---|
+| **Bundled llama.cpp** | the image's pinned llama.cpp builds, started on this machine's NVIDIA GPUs | speed, server, offload, agent | yes |
+| **Custom command** | any engine with an OpenAI-compatible server (vLLM, SGLang, ik_llama.cpp, TabbyAPI, Strata, Ollama...), started here from a command line you give | server, agent | yes, for the GPUs you tick |
+| **Remote server** | any OpenAI-compatible URL that is already running: another machine on your network or a hosted API, with an optional API key | server, agent | only for GPUs you tick on this machine; none for a server elsewhere |
+
+The bundled builds target P100, P40/P4 and V100 by default; set `CUDA_ARCHS`
+to build them for newer cards (for example `75;80;86;89`). For a remote
+server you don't need a GPU at all: see [Remote only](#remote-only-no-gpu).
 
 You open a web page, pick a model, an engine, which GPUs and which tests,
 choose how many runs each test does, and watch it live. Every run is kept in
@@ -29,12 +39,12 @@ warns once when the condition has held for 10 s and, by default, aborts the run
 ## Quick start
 
 ```bash
-docker build -t p100-bench-kit .          # 30–90 min: compiles two llama.cpp builds
+docker build -t llm-bench-kit .           # 30–90 min: compiles two llama.cpp builds
 docker run -d --name bench --gpus all -p 8090:8090 \
   -v /path/to/your/models:/models \
   -v bench-data:/data \
   -v /sys/firmware/dmi/tables:/host-dmi:ro \
-  p100-bench-kit
+  llm-bench-kit
 # optional: add --cap-add SYS_ADMIN to let runs change the GPU power cap (see Security)
 docker logs bench                          # shows where the login token is
 docker exec bench cat /data/token          # the token itself
@@ -71,17 +81,30 @@ Builds use CUDA 12.9, the last toolkit line that still targets sm_60/sm_70.
 The CPU backend is built for every x86 variant and picked at runtime, so old
 Xeons without AVX2 still work.
 
-### External server
+### Remote server
 
-The `external` engine benchmarks an OpenAI-compatible server that is already
-running, such as another engine (Strata) or a llama-server you started
-yourself. Give its URL on the New Run page; the kit reads the model id from
-`/v1/models` unless you type one. Only the **server** and **agent** modules
-run (speed and offload need llama.cpp's own tools). Things to know:
+The **Remote server** engine (`external` in result files) benchmarks an
+OpenAI-compatible server that is already running: llama-server, vLLM,
+SGLang, Ollama (`http://host:11434/v1`), LM Studio (`http://host:1234/v1`),
+Strata, or a hosted API. Give its URL on the New Run page, and an API key if
+it needs one; **Load models** lists what the server offers. Only the
+**server** and **agent** modules run (speed and offload need llama.cpp's own
+tools). Things to know:
 
+- The key is kept in memory for that run only. It is never written into the
+  run, its results or its export. For unattended use you can instead put a key
+  in `<data dir>/external_api_key` (mode 600); it is used when none is typed.
 - The kit doesn't start, stop or configure that server, so MTP, KV cache type
   and context size are whatever the server uses. The server module runs one
   pass, labelled `external`.
+- Server-module requests are streamed. Prefill and decode come from the
+  server's own llama.cpp-style timings when it sends them (llama-server,
+  Strata); otherwise from arrival times: prefill = prompt tokens / time to the
+  first token, decode = tokens after the first / time from the first to the
+  last. Each result's `extra.method` says which (`server` or `stream`).
+  Arrival timing includes the network and any queueing, so it reads low for
+  short prompts and slow links. Fields only llama.cpp knows are dropped and
+  the request retried if a server rejects them.
 - Each server prompt gets a unique prefix, so a server that ignores
   `cache_prompt: false` can't reuse an earlier read of the same prompt.
 - A server may ignore `ignore_eos` and stop early. Token counts are stored
@@ -92,10 +115,54 @@ run (speed and offload need llama.cpp's own tools). Things to know:
   as `<task>.pp` and `<task>.tg`, plus `<task>.draft_accept` on Strata. The
   counters include everything the server did meanwhile, so keep other clients
   off it during a run; on Strata the request count is stored with each task.
-- Tick the GPUs that server runs on, on this machine, so telemetry and
-  guardrails watch the right cards. If the server runs in another container,
-  start the kit's container so it can reach it (the host's LAN IP works).
+- For a server on another machine, leave the GPUs unticked: there is no
+  GPU telemetry, guardrails or cool-down. For one on this machine, tick the
+  GPUs it uses so telemetry and guardrails watch them (cool-down is still
+  skipped, since a running server keeps its cards warm). If the server runs
+  in another container, the host's LAN IP reaches it.
 - Results are marked not comparable with other machines.
+
+### Custom command
+
+The **Custom command** engine starts any engine's OpenAI-compatible server on
+this machine, benchmarks it with the same telemetry, guardrails and cleanup
+as the bundled builds, and stops it. Give the launch command on the New Run
+page, for example:
+
+```
+vllm serve {model} --port {port} --max-model-len {ctx}
+/opt/ik_llama/bin/llama-server -m {model} --port {port} -c {ctx} -ngl 99 --metrics
+```
+
+`{port}` is required (the kit's server port). `{model}` is the model file
+picked on the page, or pick *none* when the command names its own model (a
+Hugging Face id for vLLM, say). `{ctx}` is the module's context size and
+`{gpus}` the ticked GPUs, which are also set as `CUDA_VISIBLE_DEVICES`. The
+server counts as ready when `/v1/models` (or `/health`) answers, up to 30
+minutes. It runs inside the kit's container, so the engine has to be
+installed there, or run the kit [without Docker](#remote-only-no-gpu) next to
+your engines. Server and agent modules only; results are marked not
+comparable. The last command you used is remembered in your browser.
+
+### Remote only (no GPU)
+
+To benchmark remote servers from a laptop or any box without a GPU, skip the
+CUDA build:
+
+```bash
+docker build -f Dockerfile.lite -t llm-bench-kit:lite .   # ~2 min: no llama.cpp builds
+docker run -d --name bench -p 8090:8090 -v bench-data:/data llm-bench-kit:lite
+```
+
+or without Docker (Python 3.10+; the agent module also needs a hermes-agent
+checkout and its venv, see `Dockerfile.lite` for the pinned commit):
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+BENCHKIT_DATA_DIR=./data BENCHKIT_ENGINES_DIR=./no-engines .venv/bin/python -m benchkit.main
+```
+
+Only the Remote server and Custom command engines are offered then.
 
 ## Making results comparable
 
@@ -136,6 +203,13 @@ All optional, as environment variables:
   reverse proxy with HTTPS (Caddy: `reverse_proxy 127.0.0.1:8090`) or a VPN.
 - Agent tasks run shell commands chosen by the model. They run as an
   unprivileged user inside the container, in a scratch folder under `/data/agent`.
+- A Custom command run executes the launch command exactly as typed, with the
+  kit's own rights inside the container. Anyone with the token can do that, so
+  treat the token like a shell login.
+- A remote server's API key is held in memory for its run only and never
+  stored. While an agent run is going, the agent's config file holds it (the
+  agent needs it to talk to the server), so the model's shell commands could
+  read it; it is rewritten without the key when the run ends.
 - RAM type and speed come from `dmidecode`, which reads the firmware tables.
   Docker hides those from containers, so the run command mounts the host's
   copy read-only at `/host-dmi`. Leave that line out and the RAM fields show

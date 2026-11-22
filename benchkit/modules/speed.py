@@ -52,8 +52,8 @@ class SpeedModule(Module):
     }
 
     def check(self, p, model, engine, snapshot):
-        if engine.get("external"):
-            return ["llama-bench only runs llama.cpp, so it can't run against an external server"]
+        if engine.get("requests_only"):
+            return ["llama-bench only runs the bundled llama.cpp builds, not a remote server or a custom command"]
         return []
 
     def estimate_s(self, p: dict, model_gb: float) -> int:
