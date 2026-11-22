@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-"""Stands in for the hermes venv python: answers the no-tool task, otherwise a plain reply."""
-import sys
+"""Stands in for the hermes venv python: answers the no-tool task, otherwise a plain reply.
+Like the real agent it sends one chat request to the configured server (so counters move)."""
+import json, os, re, sys, urllib.request
 q = sys.argv[sys.argv.index("--query") + 1] if "--query" in sys.argv else ""
+try:
+    cfg = open(os.path.join(os.environ.get("HERMES_HOME", ""), "config.yaml")).read()
+    url = re.search(r"base_url:\s*(\S+)", cfg).group(1).strip("'\"")
+    body = {"messages": [{"role": "user", "content": q}], "max_tokens": 64}
+    urllib.request.urlopen(urllib.request.Request(url + "/chat/completions", json.dumps(body).encode(),
+                                                  {"Content-Type": "application/json"}), timeout=10).read()
+except Exception:  # noqa: BLE001 - grading uses stdout only; a missing server is the test's business
+    pass
 print("RESULT=323" if "17 multiplied by 19" in q else "I looked at the files and finished the task.")

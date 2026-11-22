@@ -218,3 +218,37 @@ def test_external_server_run(env):
             assert sv["external"]["code.tg"]["n"] == 2 and sv["external"]["prose.pp"]["median"] == 380.0
     finally:
         srv.kill()
+
+
+@pytest.mark.skipif(not os.environ.get("BENCHKIT_TEST_HERMES_SOURCE"), reason="needs a hermes-agent checkout")
+def test_agent_external_server_records_prefill_decode(env):
+    import subprocess
+    import sys
+    from pathlib import Path
+    fake = Path(__file__).resolve().parent / "fakes" / "engines" / "fake" / "bin" / "llama-server"
+    port = 19500 + os.getpid() % 400
+    srv = subprocess.Popen([sys.executable, str(fake), "--port", str(port)], stdout=subprocess.DEVNULL)
+    try:
+        url = f"http://127.0.0.1:{port}"
+        with make_client() as c:
+            login(c)
+            for _ in range(50):  # wait for the fake to listen
+                r = c.post("/api/runs", json={"engine": "external", "server_url": url, "gpus": [0],
+                                              "modules": {"agent": {"tasks": ["no_tool_required", "err_case_search"]}}})
+                if r.status_code == 200:
+                    break
+                time.sleep(0.1)
+            run = r.json()
+            assert not run["preflight"]["block"], run["preflight"]
+            c.post(f"/api/runs/{run['id']}/start")
+            assert wait_done(c, run["id"]) == "done"
+            d = c.get(f"/api/runs/{run['id']}").json()
+            got = {(x["metric"], x["variant"]): x for x in d["results"] if x["module"] == "agent"}
+            for task in ("no_tool_required", "err_case_search"):
+                assert got[(f"{task}.pp", "external")]["value"] == pytest.approx(380.0, rel=0.01)
+                assert got[(f"{task}.tg", "external")]["value"] == pytest.approx(26.0, rel=0.01)
+            tp = d["throughput"]["agent"]["external"]
+            assert tp["prompt"]["n"] == 2 and tp["gen"]["avg"] == pytest.approx(26.0, rel=0.01)
+    finally:
+        srv.kill()
+

@@ -8,6 +8,15 @@ ab_eval's runner: no bwrap (the container is the sandbox), agent processes
 run as an unprivileged user, and each task-rep is tracked and timed here.
 
 Pass rate mostly measures the model; wall time is what changes with hardware.
+
+Prefill and decode: when the kit starts llama-server itself, every request's
+prompt and generation rate comes from the server's own timing lines. An
+external server (Strata, a llama-server started elsewhere) is read through its
+llama.cpp-style Prometheus counters (llama-server /metrics with --metrics,
+Strata /metrics/prometheus) before and after each task, stored per task as
+<task>.pp / <task>.tg (and <task>.draft_accept on Strata). Counters cover
+everything the server did meanwhile, so another client using it during the run
+adds to the numbers; on Strata the request count is stored to make that visible.
 """
 
 from __future__ import annotations
@@ -20,7 +29,7 @@ from pathlib import Path
 
 import yaml
 
-from ..llserver import open_server
+from ..llserver import counter_rates, open_server
 from ..procs import Proc
 from .base import Module, load_s
 
@@ -73,6 +82,19 @@ def _chown_tree(path: Path, uid: int) -> None:
             os.lchown(n, uid, uid)
 
 
+def _record_rates(ctx, module: str, rep: int, task: str, r: dict) -> None:
+    """One task's prefill/decode from an external server's counters, as <task>.pp / .tg results."""
+    extra = {k: r[k] for k in ("requests", "cached") if k in r}
+    if r["pp"]:
+        ctx.result(module, rep, "external", f"{task}.pp", r["pp"], "t/s",
+                   {"tokens": r["prompt_tokens"], "seconds": r["prompt_s"], **extra})
+    if r["tg"]:
+        ctx.result(module, rep, "external", f"{task}.tg", r["tg"], "t/s", {"tokens": r["gen_tokens"], "seconds": r["gen_s"]})
+    if r.get("draft_accept") is not None:
+        ctx.result(module, rep, "external", f"{task}.draft_accept", r["draft_accept"], "",
+                   {"draft_n": r["draft_n"], "accepted": r["draft_accepted"]})
+
+
 class AgentModule(Module):
     name = "agent"
     label = "Agent battery (Hermes)"
@@ -117,6 +139,10 @@ class AgentModule(Module):
                 srv.base + "/v1", model_label, p["ctx"], p["max_tokens"], p["task_timeout_s"])))
             steps = p["reps"] * len(p["tasks"])
             step = 0
+            counters = srv.counters() if external else None
+            if external and counters is None:
+                ctx.event("warn", "agent_counters", "the external server exposes no llama.cpp-style counters "
+                          "(/metrics/prometheus or /metrics; llama-server needs --metrics): no prefill/decode numbers")
             for rep in range(p["reps"]):
                 for task in p["tasks"]:
                     if ctx.abort.is_set():
@@ -154,6 +180,11 @@ class AgentModule(Module):
                     except Exception:  # noqa: BLE001
                         ok = False
                     ctx.agent_task(task, rep, wall, rc, ok, tail)
+                    if counters is not None:
+                        after = srv.counters()
+                        if after is not None:
+                            _record_rates(ctx, self.name, rep, task, counter_rates(counters, after))
+                            counters = after
         # summary rows so agent numbers sit beside the other modules in exports
         rows = ctx.db.get_agent_tasks(ctx.run_id)
         for task in p["tasks"]:
