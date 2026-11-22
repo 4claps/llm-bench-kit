@@ -16,7 +16,7 @@ a history you can compare, mark invalid, and export.
 | **Speed** | `llama-bench` prompt processing and decode t/s at empty and 16k context, per KV cache type | 5–15 min |
 | **Server** | real `llama-server` requests: a ~2k-token prose summary and a code prompt, fixed output length, MTP on and off | 5–10 min |
 | **RAM offload** | MoE expert layers in system RAM (`-ot exps=CPU`); decode is then bound by RAM bandwidth, so this separates DDR3 from DDR4 boxes | 5–10 min |
-| **Agent** | the Hermes agent tool-use battery (trap tasks from hermes-agent's `toolperf_abeval`, MIT); pass rate and wall time per task | ~2 min per task per run |
+| **Agent** | the Hermes agent tool-use battery (trap tasks from hermes-agent's `toolperf_abeval`, MIT); pass rate and wall time per task, plus prompt processing (prefill) and decode t/s | ~2 min per task per run |
 
 Every test cools the GPUs to 48 °C before it starts and records GPU
 temperature, SM and memory clocks, power, utilization, VRAM, PCIe link, CPU
@@ -86,6 +86,12 @@ run (speed and offload need llama.cpp's own tools). Things to know:
   `cache_prompt: false` can't reuse an earlier read of the same prompt.
 - A server may ignore `ignore_eos` and stop early. Token counts are stored
   next to every rate; check them before you compare.
+- Agent prefill and decode come from the server's llama.cpp-style Prometheus
+  counters, read before and after each task (Strata: `/metrics/prometheus`;
+  llama-server: `/metrics`, which needs `--metrics`). They are stored per task
+  as `<task>.pp` and `<task>.tg`, plus `<task>.draft_accept` on Strata. The
+  counters include everything the server did meanwhile, so keep other clients
+  off it during a run; on Strata the request count is stored with each task.
 - Tick the GPUs that server runs on, on this machine, so telemetry and
   guardrails watch the right cards. If the server runs in another container,
   start the kit's container so it can reach it (the host's LAN IP works).

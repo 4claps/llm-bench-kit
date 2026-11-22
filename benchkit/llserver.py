@@ -92,6 +92,56 @@ class LlamaServer:
         self.stop()
 
 
+COUNTER_PATHS = ("/metrics/prometheus", "/metrics")  # Strata (its /metrics is JSON), then llama-server (needs --metrics)
+
+
+def parse_counters(text: str) -> dict[str, float]:
+    """llama.cpp-style Prometheus counters (llamacpp:*, and Strata's strata:*) from a /metrics text page."""
+    out = {}
+    for line in text.splitlines():
+        if line and not line.startswith("#") and (line.startswith("llamacpp:") or line.startswith("strata:")):
+            parts = line.split()
+            try:
+                out[parts[0]] = float(parts[1])
+            except (IndexError, ValueError):
+                pass
+    return out
+
+
+def fetch_counters(base: str, timeout: float = 10) -> dict[str, float] | None:
+    """The server's cumulative prompt/decode counters, or None if it exposes none."""
+    for path in COUNTER_PATHS:
+        try:
+            with urllib.request.urlopen(base + path, timeout=timeout) as r:
+                c = parse_counters(r.read().decode("utf-8", "replace"))
+        except (urllib.error.URLError, OSError, ValueError):
+            continue
+        if "llamacpp:prompt_tokens_total" in c:
+            return c
+    return None
+
+
+def counter_rates(before: dict, after: dict) -> dict:
+    """Prefill and decode between two counter snapshots: tokens, seconds and tokens/s.
+
+    Prompt tokens are the ones the server actually read (llama.cpp and Strata both leave out
+    tokens reused from a cache); "cached" is the reused count where the server reports it."""
+    d = lambda k: after.get(k, 0.0) - before.get(k, 0.0)
+    pt, ps = d("llamacpp:prompt_tokens_total"), d("llamacpp:prompt_seconds_total")
+    gt, gs = d("llamacpp:tokens_predicted_total"), d("llamacpp:tokens_predicted_seconds_total")
+    out = {"prompt_tokens": int(pt), "prompt_s": round(ps, 3), "pp": round(pt / ps, 2) if pt > 0 and ps > 0 else None,
+           "gen_tokens": int(gt), "gen_s": round(gs, 3), "tg": round(gt / gs, 2) if gt > 0 and gs > 0 else None}
+    if "llamacpp:prompt_tokens_cached_total" in after:
+        out["cached"] = int(d("llamacpp:prompt_tokens_cached_total"))
+    if "strata:requests_total" in after:
+        out["requests"] = int(d("strata:requests_total"))
+    if "strata:drafts_offered_total" in after:
+        off, acc = d("strata:drafts_offered_total"), d("strata:drafts_accepted_total")
+        out["draft_accept"] = round(acc / off, 4) if off > 0 else None
+        out["draft_n"], out["draft_accepted"] = int(off), int(acc)
+    return out
+
+
 def probe_external(url: str, timeout: float = 5) -> tuple[bool, str, str]:
     """(healthy, model id, message) for an already-running OpenAI-compatible server."""
     base = url.rstrip("/").removesuffix("/v1")
@@ -138,6 +188,9 @@ class ExternalServer:
                                      headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read())
+
+    def counters(self) -> dict[str, float] | None:
+        return fetch_counters(self.base)
 
     def stop(self) -> None:
         pass

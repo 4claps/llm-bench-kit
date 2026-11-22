@@ -336,3 +336,64 @@ def test_kill_all_kills_and_reports_tracked_procs():
     assert any(str(p.pid) in d and "sleep" in d for d in killed)
     assert not p.alive()
     assert kill_all() == []  # nothing left tracked and running
+
+
+STRATA_PROM = """# HELP llamacpp:prompt_tokens_total prompt tokens read
+llamacpp:prompt_tokens_total 1000
+llamacpp:prompt_tokens_cached_total 5000
+llamacpp:prompt_seconds_total 2.0
+llamacpp:tokens_predicted_total 300
+llamacpp:tokens_predicted_seconds_total 4.0
+llamacpp:prompt_tokens_seconds 500.0
+strata:requests_total 7
+strata:drafts_offered_total 400
+strata:drafts_accepted_total 300
+"""
+
+
+def test_counter_rates_from_strata_style_counters():
+    from benchkit.llserver import counter_rates, parse_counters
+    before = parse_counters(STRATA_PROM)
+    assert before["llamacpp:prompt_tokens_total"] == 1000 and before["strata:requests_total"] == 7
+    after = dict(before)
+    after.update({"llamacpp:prompt_tokens_total": 21000, "llamacpp:prompt_seconds_total": 22.0,
+                  "llamacpp:prompt_tokens_cached_total": 9000, "llamacpp:tokens_predicted_total": 1100,
+                  "llamacpp:tokens_predicted_seconds_total": 14.0, "strata:requests_total": 10,
+                  "strata:drafts_offered_total": 1400, "strata:drafts_accepted_total": 1000})
+    r = counter_rates(before, after)
+    assert (r["prompt_tokens"], r["pp"], r["gen_tokens"], r["tg"]) == (20000, 1000.0, 800, 80.0)
+    assert (r["cached"], r["requests"], r["draft_accept"]) == (4000, 3, 0.7)
+
+
+def test_counter_rates_plain_llama_server_and_idle():
+    from benchkit.llserver import counter_rates
+    c = {"llamacpp:prompt_tokens_total": 10.0, "llamacpp:prompt_seconds_total": 1.0,
+         "llamacpp:tokens_predicted_total": 5.0, "llamacpp:tokens_predicted_seconds_total": 1.0}
+    r = counter_rates(c, c)  # nothing happened between the snapshots
+    assert r["pp"] is None and r["tg"] is None and "cached" not in r and "draft_accept" not in r
+
+
+def test_fetch_counters_from_fake_server():
+    import os
+    import subprocess
+    import sys
+    import time
+    from pathlib import Path
+    from benchkit.llserver import fetch_counters
+    fake = Path(__file__).resolve().parent / "fakes" / "engines" / "fake" / "bin" / "llama-server"
+    port = 18000 + os.getpid() % 1000
+    srv = subprocess.Popen([sys.executable, str(fake), "--port", str(port)], stdout=subprocess.DEVNULL)
+    try:
+        base = f"http://127.0.0.1:{port}"
+        for _ in range(50):
+            c0 = fetch_counters(base)
+            if c0 is not None:
+                break
+            time.sleep(0.1)
+        assert c0 == {"llamacpp:prompt_tokens_total": 0, "llamacpp:prompt_seconds_total": 0.0,
+                      "llamacpp:tokens_predicted_total": 0, "llamacpp:tokens_predicted_seconds_total": 0.0}
+        assert fetch_counters("http://127.0.0.1:9") is None  # nothing listening
+    finally:
+        srv.kill()
+
+
