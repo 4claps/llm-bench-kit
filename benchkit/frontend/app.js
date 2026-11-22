@@ -90,6 +90,17 @@ function openStream() {
 function destroyCharts() { state.charts.forEach((c) => c.plot && c.plot.destroy()); state.charts = []; }
 const PALETTE = ["#2563eb", "#dc2626", "#16a34a", "#d97706", "#7c3aed", "#0891b2", "#db2777", "#65a30d"];
 
+function gpuMem(g) {
+  // VRAM; plus the shared system memory (GTT) the GPU maps when that is bigger, as on APUs and the BC-250
+  const gb = (m) => { const v = (m || 0) / 1024; return (v < 10 ? +v.toFixed(1) : Math.round(v)) + " GB"; };
+  return gb(g.memory_total) + (g.gtt_total > (g.memory_total || 0) ? " VRAM + " + gb(g.gtt_total) + " shared" : "");
+}
+
+function chartGpus(spec) {
+  // a remote server's run with exporters charts that machine's GPUs; otherwise the GPUs ticked here
+  return ((spec.telemetry_urls && spec.telemetry_urls.length ? spec.remote_gpus : spec.gpus) || []).map(String);
+}
+
 function metricSeries(metric, samples, gpus) {
   // -> {x: [], ys: [[]...], names: []}
   const x = samples.map((s) => s.t);
@@ -204,35 +215,54 @@ async function viewRun(_, gen = state.gen) {
     ...models.custom.map((m) => `<option value="${esc(m.id)}">custom: ${esc(m.label)}</option>`)].join("");
   const gpus = sys.snapshot.gpus || [];
   const engines = sys.engines.filter((e) => e.available);
+  const localEngines = engines.filter((e) => !e.external);
   $("#view").innerHTML = `
   <h1>New run</h1>
   ${sys.active_run ? `<div class="card warn">A run is active: <a href="#/live/${esc(sys.active_run)}">watch it</a>.</div>` : ""}
-  <div class="card">
-    <div class="row">
+  <div class="tabs" role="tablist">
+    <button class="tab" role="tab" data-tab="local" id="t-local">This machine</button>
+    <button class="tab" role="tab" data-tab="remote" id="t-remote">Remote server</button>
+  </div>
+  <div class="card" data-panel="local">
+    <div class="small muted">The kit starts the engine on this machine's GPUs and watches them: telemetry, guardrails, power cap.</div>
+    <div class="row" style="margin-top:10px">
+      <label class="field"><span>Engine</span><select id="r-engine">${localEngines.map((e) => `<option value="${esc(e.name)}">${esc(e.label || e.name)}</option>`).join("")}</select></label>
       <label class="field" style="flex:2"><span>Model</span><select id="r-model">${opts || "<option value=''>no models yet: see Models</option>"}</select></label>
-      <label class="field"><span>Engine</span><select id="r-engine">${engines.map((e) => `<option value="${esc(e.name)}">${esc(e.label || e.name)}</option>`).join("")}</select></label>
       <label class="field"><span>Multi-GPU split</span><select id="r-split"><option value="">engine default</option><option>layer</option><option>tensor</option></select></label>
       <label class="field"><span>GPU layers (-ngl)</span><input type="number" id="r-ngl" min="0" max="999" placeholder="all (default)"></label>
-      <label class="field" style="flex:1"><span>Label (optional)</span><input type="text" id="r-label" maxlength="120"></label>
     </div>
-    <div class="row" id="r-ext" hidden>
-      <label class="field" style="flex:2"><span>Server URL</span><input type="text" id="r-url" placeholder="http://10.0.0.5:8080/v1"></label>
-      <label class="field" style="flex:1"><span>API key (if it needs one; not saved)</span><input type="password" id="r-key" autocomplete="off"></label>
-      <label class="field" style="flex:2"><span>Model id</span><input type="text" id="r-smodel" list="r-smodels" placeholder="first one the server lists"><datalist id="r-smodels"></datalist></label>
-      <button class="secondary" id="r-load-models" style="align-self:flex-end">Load models</button>
-    </div>
-    <div class="small muted" id="r-ext-note" hidden>Any OpenAI-compatible server that is already running, on this machine or another: llama-server, vLLM, SGLang, Ollama, LM Studio, Strata or a hosted API. Only the server and agent modules run, and results are marked not comparable. Prefill and decode come from the server's own timings when it sends them, else from streaming arrival times. Leave the GPUs unticked for a server on another machine; tick the ones it uses if it runs here, to get telemetry and guardrails. The key is kept in memory for this run only.</div>
     <div class="row" id="r-cmd" hidden>
       <label class="field" style="flex:4"><span>Launch command</span><input type="text" id="r-launch" placeholder="vllm serve {model} --port {port} --max-model-len {ctx}"></label>
       <label class="field" style="flex:1"><span>Model id (optional)</span><input type="text" id="r-cmodel" placeholder="asked from the server"></label>
     </div>
-    <div class="small muted" id="r-cmd-note" hidden>Any engine with an OpenAI-compatible server, started here: the kit runs the command, waits until <code>/v1/models</code> answers, benchmarks it with full telemetry and guardrails, and stops it. <code>{port}</code> is required; <code>{model}</code> is the model file picked above (or pick none if the command names its own), <code>{ctx}</code> the module's context size and <code>{gpus}</code> the ticked GPUs (also set as CUDA_VISIBLE_DEVICES). Server and agent modules only; results are marked not comparable.</div>
+    <div class="small muted" id="r-cmd-note" hidden>Any engine with an OpenAI-compatible server: the kit runs the command, waits until <code>/v1/models</code> answers, benchmarks it and stops it. <code>{port}</code> is required; <code>{model}</code> is the model file picked above (or pick none if the command names its own), <code>{ctx}</code> the module's context size and <code>{gpus}</code> the ticked GPUs (also set as CUDA_VISIBLE_DEVICES or HIP_VISIBLE_DEVICES). Server and agent modules only; results are marked not comparable.</div>
     <h3>GPUs</h3>
-    <div class="chips" id="r-gpus">${gpus.map((g) => `<label><input type="checkbox" value="${g.index}" checked> ${g.index}: ${esc(g.name)} (${Math.round((g.memory_total || 0) / 1024)} GB)</label>`).join("") || '<span class="err">No GPUs visible.</span>'}</div>
-    <h3>Presets</h3>
-    <div class="row"><select id="r-preset"><option value="">(none)</option>${presets.map((p) => `<option>${esc(p.name)}</option>`).join("")}</select>
-      <button class="secondary" id="r-preset-load">Load</button>
-      <input type="text" id="r-preset-name" placeholder="preset name"><button class="secondary" id="r-preset-save">Save current</button></div>
+    <div class="chips" id="r-gpus">${gpus.map((g) => `<label><input type="checkbox" value="${g.index}" checked> ${g.index}: ${esc(g.name)} (${gpuMem(g)}${g.vendor && (sys.snapshot.gpu_vendor || "").includes("+") ? ", " + esc(g.vendor) : ""})</label>`).join("") || '<span class="err">No GPUs visible here. Use the Remote server tab to benchmark another machine.</span>'}</div>
+  </div>
+  <div class="card" data-panel="remote" hidden>
+    <div class="small muted">Any OpenAI-compatible server that is already running: another machine on your network (llama-server, vLLM, SGLang, Ollama, LM Studio, Strata) or a hosted API. The kit only sends it requests.</div>
+    <div class="row" style="margin-top:10px">
+      <label class="field" style="flex:2"><span>Server URL</span><input type="text" id="r-url" placeholder="http://10.0.0.5:8080/v1"></label>
+      <label class="field" style="flex:1"><span>API key (if it needs one; not saved)</span><input type="password" id="r-key" autocomplete="off"></label>
+    </div>
+    <div class="row">
+      <label class="field" style="flex:2"><span>Model id</span><input type="text" id="r-smodel" list="r-smodels" placeholder="first one the server lists"><datalist id="r-smodels"></datalist></label>
+      <button class="secondary" id="r-load-models" style="align-self:flex-end">Load models</button>
+    </div>
+    <div class="row">
+      <label class="field" style="flex:1"><span>Telemetry exporters on that machine (optional, space-separated)</span><input type="text" id="r-telurls" placeholder="http://10.0.0.5:9100/metrics http://10.0.0.5:9835/metrics"></label>
+    </div>
+    <details class="small muted" style="margin-top:8px"><summary>How remote runs are measured</summary>
+      <p>Only the server and agent modules run, and results are marked not comparable. Prefill and decode come from the server's own timings when it sends them (llama-server, Strata), else from streaming arrival times, which include the network. With exporters (node_exporter for CPU and RAM; nvidia_gpu_exporter or DCGM for NVIDIA GPUs; node_exporter's drm collector for AMD) the run gets that machine's charts, guardrails and hardware record; without them it has no GPU telemetry or guardrails. The key is kept in memory for this run only.</p></details>
+  </div>
+  <div class="card">
+    <div class="row">
+      <label class="field" style="flex:2"><span>Label (optional)</span><input type="text" id="r-label" maxlength="120"></label>
+      <label class="field"><span>Preset</span><select id="r-preset"><option value="">(none)</option>${presets.map((p) => `<option>${esc(p.name)}</option>`).join("")}</select></label>
+      <button class="secondary" id="r-preset-load" style="align-self:flex-end">Load</button>
+      <label class="field"><span>Save as preset</span><input type="text" id="r-preset-name" placeholder="preset name"></label>
+      <button class="secondary" id="r-preset-save" style="align-self:flex-end">Save current</button>
+    </div>
   </div>
   <h2>Modules</h2>
   <div class="grid" id="r-modules">${sys.modules.map((m) => `
@@ -241,21 +271,25 @@ async function viewRun(_, gen = state.gen) {
       <div class="small muted">${esc(m.description)}</div>
       <div class="params">${Object.entries(m.params).map(([k, s]) => paramInput(m.name, k, s, s.default)).join("")}</div>
     </div>`).join("")}</div>
-  ${powerCapCard(sys)}
+  <div data-panel="local">${powerCapCard(sys)}</div>
   <div class="card">
     <h3>Guardrails</h3>
-    <div class="small muted">Warnings always show. Tick to also abort the run when one fires (after ${esc(sys.guardrails.sustain_s)} s sustained).</div>
+    <div class="small muted" id="g-note">Warnings always show. Tick to also abort the run when one fires (after ${esc(sys.guardrails.sustain_s)} s sustained).</div>
     <div class="chips"><label><input type="checkbox" id="g-low" checked> abort on low clock (&lt; ${esc(sys.guardrails.low_clock_mhz)} MHz while busy)</label>
       <label><input type="checkbox" id="g-thermal" checked> abort on temperature &gt; ${esc(sys.guardrails.thermal_warn_c)} °C</label></div>
     <div class="row" style="margin-top:12px"><button id="r-review">Review run</button></div>
   </div>
   <div id="r-confirm"></div>`;
+  $$(".tab").forEach((t) => (t.onclick = () => setRunTab(t.dataset.tab)));
   $$(".module").forEach((el) => $(".mod-on", el).addEventListener("change", (e) => el.classList.toggle("off", !e.target.checked)));
   $("#r-review").onclick = reviewRun;
   $("#r-engine").addEventListener("change", syncEngine);
   $("#r-load-models").onclick = loadRemoteModels;
   try { $("#r-launch").value = localStorage.getItem("benchkit.launch_cmd") || ""; } catch (_) { /* no storage */ }
-  syncEngine();
+  $("#r-telurls").addEventListener("input", syncEngine);
+  let tab = "local";
+  try { tab = localStorage.getItem("benchkit.run_tab") || (gpus.length ? "local" : "remote"); } catch (_) { /* no storage */ }
+  setRunTab(tab === "remote" || !gpus.length ? "remote" : "local");
   $("#pc-change").addEventListener("change", (e) => ($("#pc-choices").hidden = !e.target.checked));
   $("#r-preset-save").onclick = async () => {
     const name = $("#r-preset-name").value.trim(); if (!name) return toast("Name the preset first");
@@ -288,30 +322,38 @@ function powerCapCard(sys) {
   </div>`;
 }
 
+function setRunTab(tab) {
+  state.runTab = tab;
+  try { localStorage.setItem("benchkit.run_tab", tab); } catch (_) { /* no storage */ }
+  $$(".tab").forEach((t) => t.setAttribute("aria-selected", String(t.dataset.tab === tab)));
+  $$("[data-panel]").forEach((p) => (p.hidden = p.dataset.panel !== tab));
+  syncEngine();
+}
+
 function curEngine() {
+  if (state.runTab === "remote") return state.system.engines.find((e) => e.external) || {};
   return state.system.engines.find((e) => e.name === $("#r-engine").value) || {};
 }
-function isExternal() { return !!curEngine().external; }
-function isCommand() { return !!curEngine().command; }
+function isExternal() { return state.runTab === "remote"; }
+function isCommand() { return !isExternal() && !!curEngine().command; }
 
-let lastEngine = null;
 function syncEngine() {
   const ext = isExternal(), cmd = isCommand(), reqOnly = ext || cmd;
-  $("#r-ext").hidden = $("#r-ext-note").hidden = !ext;
   $("#r-cmd").hidden = $("#r-cmd-note").hidden = !cmd;
-  $("#r-model").disabled = ext;
-  $("#r-split").disabled = $("#r-ngl").disabled = reqOnly;
+  // llama.cpp launch settings only apply to the bundled builds
+  $("#r-split").closest(".field").hidden = $("#r-ngl").closest(".field").hidden = reqOnly;
+  // guardrails on a remote run need that machine's exporters
+  const tel = ext && $("#r-telurls").value.trim();
+  $("#g-note").textContent = ext && !tel ? "Guardrails need the remote machine's exporters (above); without them nothing is watched."
+    : "Warnings always show. Tick to also abort the run when one fires.";
   // the custom command may name its own model (vllm serve Qwen/..., ollama): offer "none"
   const none = $("#r-model option.cmd-none");
   if (cmd && !none) $("#r-model").insertAdjacentHTML("afterbegin", "<option class='cmd-none' value=''>none: the command names its model</option>");
   if (!cmd && none) none.outerHTML = "";
-  // a remote server usually runs on another machine: start with no local GPUs ticked
-  if (ext && lastEngine !== "external") $$("#r-gpus input").forEach((i) => (i.checked = false));
-  if (!ext && lastEngine === "external") $$("#r-gpus input").forEach((i) => (i.checked = true));
-  lastEngine = $("#r-engine").value;
   for (const el of $$(".module")) {
     if (!["speed", "offload"].includes(el.dataset.mod)) continue;
     const box = $(".mod-on", el);
+    el.hidden = reqOnly;  // llama.cpp's own tools: only with the bundled builds
     box.disabled = reqOnly;
     if (reqOnly && box.checked) { box.checked = false; el.classList.add("off"); }
   }
@@ -334,26 +376,30 @@ function collectSpec(forPreset = false) {
     modules[name] = Object.fromEntries(Object.entries(desc.params).map(([k, s]) => [k, readParam(name, k, s)]));
   }
   const abort_on = [$("#g-low").checked && "low_clock", $("#g-thermal").checked && "thermal"].filter(Boolean);
-  return { model: $("#r-model").value, engine: $("#r-engine").value, split: $("#r-split").value,
-    ngl: $("#r-ngl").value === "" ? null : parseInt($("#r-ngl").value, 10), label: forPreset ? "" : $("#r-label").value,
-    gpus: $$("#r-gpus input:checked").map((i) => +i.value), modules, abort_on,
-    power_cap: $("#pc-change").checked && $("input[name=pc]:checked") ? +$("input[name=pc]:checked").value : null,
+  const ext = isExternal();
+  return { model: ext ? "" : $("#r-model").value, engine: curEngine().name, split: ext ? "" : $("#r-split").value,
+    ngl: ext || $("#r-ngl").value === "" ? null : parseInt($("#r-ngl").value, 10), label: forPreset ? "" : $("#r-label").value,
+    gpus: ext ? [] : $$("#r-gpus input:checked").map((i) => +i.value), modules, abort_on,
+    power_cap: !ext && $("#pc-change").checked && $("input[name=pc]:checked") ? +$("input[name=pc]:checked").value : null,
     ...(isExternal() ? { server_url: $("#r-url").value.trim(), server_model: $("#r-smodel").value.trim(),
+                         telemetry_urls: $("#r-telurls").value.trim().split(/[\s,]+/).filter(Boolean),
                          ...(forPreset ? {} : { server_key: $("#r-key").value }) } : {}),
     ...(isCommand() ? { launch_cmd: $("#r-launch").value.trim(), server_model: $("#r-cmodel").value.trim() } : {}) };
 }
 
 function applySpec(spec) {
+  setRunTab(spec.engine === "external" ? "remote" : "local");
   if (spec.model) $("#r-model").value = spec.model;
-  if (spec.engine) $("#r-engine").value = spec.engine;
+  if (spec.engine && spec.engine !== "external") $("#r-engine").value = spec.engine;
   syncEngine();
   $("#r-url").value = spec.server_url || "";
+  $("#r-telurls").value = (spec.telemetry_urls || []).join(" ");
   $("#r-smodel").value = spec.engine === "external" ? spec.server_model || "" : "";
   if (spec.launch_cmd) $("#r-launch").value = spec.launch_cmd;
   $("#r-cmodel").value = spec.engine === "command" ? spec.server_model || "" : "";
   $("#r-split").value = spec.split || "";
   $("#r-ngl").value = spec.ngl ?? "";
-  $$("#r-gpus input").forEach((i) => (i.checked = (spec.gpus || []).includes(+i.value)));
+  if (spec.engine !== "external") $$("#r-gpus input").forEach((i) => (i.checked = (spec.gpus || []).includes(+i.value)));
   for (const el of $$(".module")) {
     const name = el.dataset.mod, p = (spec.modules || {})[name];
     $(".mod-on", el).checked = !!p; el.classList.toggle("off", !p);
@@ -370,7 +416,7 @@ function applySpec(spec) {
   }
   $("#g-low").checked = (spec.abort_on || []).includes("low_clock");
   $("#g-thermal").checked = (spec.abort_on || []).includes("thermal");
-  const pc = spec.power_cap && $(`input[name=pc][value="${spec.power_cap}"]`);
+  const pc = spec.power_cap && $(`input[name=pc][value="${spec.power_cap}"]`);  // (power cap card: local tab only)
   if (pc && !$("#pc-change").disabled) pc.checked = true;
   $("#pc-change").checked = !!(pc && !$("#pc-change").disabled);
   $("#pc-choices").hidden = !$("#pc-change").checked;
@@ -390,7 +436,8 @@ async function reviewRun() {
     <h2>Confirm</h2>
     <dl class="kv"><dt>Model</dt><dd>${esc(r.spec.model)}</dd><dt>Engine</dt><dd>${esc(r.spec.engine)}${r.spec.server_url ? " at " + esc(r.spec.server_url) : ""}</dd>
       ${r.spec.launch_cmd ? `<dt>Command</dt><dd><code>${esc(r.spec.launch_cmd)}</code></dd>` : ""}
-      <dt>GPUs</dt><dd>${r.spec.gpus.length ? esc(r.spec.gpus.join(", ")) : "none (no GPU telemetry)"}${r.spec.gpus.length > 1 && !reqOnly ? ", " + esc(r.spec.split) + " split" : ""}${r.spec.ngl != null ? ", ngl " + esc(r.spec.ngl) : ""}</dd><dt>Modules</dt><dd>${esc(Object.keys(r.spec.modules).join(", "))}</dd>
+      ${r.spec.telemetry_urls && r.spec.telemetry_urls.length ? `<dt>Telemetry</dt><dd>${esc(r.spec.telemetry_urls.join(", "))} (remote GPUs ${esc((r.spec.remote_gpus || []).join(", ") || "none")})</dd>` : ""}
+      <dt>GPUs</dt><dd>${r.spec.gpus.length ? esc(r.spec.gpus.join(", ")) : (r.spec.telemetry_urls && r.spec.telemetry_urls.length ? "none here" : "none (no GPU telemetry)")}${r.spec.gpus.length > 1 && !reqOnly ? ", " + esc(r.spec.split) + " split" : ""}${r.spec.ngl != null ? ", ngl " + esc(r.spec.ngl) : ""}</dd><dt>Modules</dt><dd>${esc(Object.keys(r.spec.modules).join(", "))}</dd>
       <dt>Power cap</dt><dd>${r.spec.power_cap ? esc(r.spec.power_cap + " W for this run, then back to " + powerCapText(state.system.snapshot, r.spec.gpus)) : esc(powerCapText(state.system.snapshot, r.spec.gpus) + " (unchanged)")}</dd>
       <dt>Estimated time</dt><dd>about ${esc(dur(r.estimate_s))} (rough)</dd></dl>
     ${pf.block.length ? `<h3 class="err">Blocked</h3><ul>${pf.block.map((b) => `<li class="err">${esc(b)}</li>`).join("")}</ul>` : ""}
@@ -409,7 +456,7 @@ async function viewLive(id, gen = state.gen) {
   if (!id) { $("#view").innerHTML = `<div class="card">No run is active. <a href="#/history">History</a></div>`; return; }
   const d = await api("/runs/" + id);
   if (!["created", "running"].includes(d.run.status)) { location.hash = "#/detail/" + id; return; }
-  const gpus = d.run.spec.gpus.map(String);
+  const gpus = chartGpus(d.run.spec);
   const samples = (await api(`/runs/${id}/telemetry?max_points=900`));
   const layout = await getLayout();
   fresh(gen);
@@ -581,7 +628,7 @@ async function viewDetail(id, gen = state.gen) {
   const det = $("details.card");
   det.addEventListener("toggle", async () => {
     if (!det.open || det.dataset.loaded) return; det.dataset.loaded = 1;
-    const samples = await api(`/runs/${id}/telemetry?max_points=1500`); const gpus = (spec.gpus || []).map(String);
+    const samples = await api(`/runs/${id}/telemetry?max_points=1500`); const gpus = chartGpus(spec);
     const layout = await getLayout();
     if (gen !== state.gen) return;
     renderCharts($("#d-charts"), layout, samples, gpus);
@@ -655,7 +702,7 @@ async function viewSystem(_, gen = state.gen) {
   $("#view").innerHTML = `
   <h1>System</h1>
   <div class="card table-wrap"><h2>GPUs</h2><table><tr><th>#</th><th>name</th><th>VRAM</th><th>power limit</th><th>PCIe now / max</th><th>max SM clock</th><th>driver</th></tr>
-    ${(snap.gpus || []).map((g) => `<tr><td>${g.index}</td><td>${esc(g.name)}</td><td>${Math.round((g.memory_total || 0) / 1024)} GB</td><td>${esc(g.power_limit)} W</td>
+    ${(snap.gpus || []).map((g) => `<tr><td>${g.index}</td><td>${esc(g.name)}</td><td>${gpuMem(g)}</td><td>${g.power_limit == null ? "?" : esc(g.power_limit) + " W"}</td>
       <td>gen ${esc(g.pcie_link_gen_current)} x${esc(g.pcie_link_width_current)} / gen ${esc(g.pcie_link_gen_max)} x${esc(g.pcie_link_width_max)}</td><td>${esc(g.clocks_max_sm)} MHz</td><td>${esc(g.driver_version)}</td></tr>`).join("")}</table>
     <p class="small muted">PCIe gen drops at idle; check it under load if it looks low.</p></div>
   <div class="grid">

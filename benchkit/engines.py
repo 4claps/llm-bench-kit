@@ -27,7 +27,7 @@ EXTERNAL = {"name": "external", "label": "Remote server (OpenAI-compatible URL)"
 # Any engine with an OpenAI-compatible server, started by the kit on this
 # machine from a command line given with the run: it gets the same telemetry,
 # guardrails and cleanup as the bundled builds, measured through its HTTP API.
-COMMAND = {"name": "command", "label": "Custom command (any engine, started here)", "command": True,
+COMMAND = {"name": "command", "label": "Custom command (any engine)", "command": True,
            "requests_only": True, "available": True,
            "repo": "", "commit": "", "cuda_archs": "", "multi_gpu_split": "layer", "env": {},
            "notes": "Starts any OpenAI-compatible server from your command line ({port} is required; "

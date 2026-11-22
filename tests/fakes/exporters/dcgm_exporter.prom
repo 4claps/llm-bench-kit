@@ -1,0 +1,8 @@
+# HELP DCGM_FI_DEV_GPU_TEMP GPU temperature (in C).
+DCGM_FI_DEV_SM_CLOCK{gpu="0",UUID="GPU-x",device="nvidia0",modelName="NVIDIA L4",Hostname="h"} 2040
+DCGM_FI_DEV_MEM_CLOCK{gpu="0",UUID="GPU-x",device="nvidia0",modelName="NVIDIA L4",Hostname="h"} 6250
+DCGM_FI_DEV_GPU_TEMP{gpu="0",UUID="GPU-x",device="nvidia0",modelName="NVIDIA L4",Hostname="h"} 64
+DCGM_FI_DEV_POWER_USAGE{gpu="0",UUID="GPU-x",device="nvidia0",modelName="NVIDIA L4",Hostname="h"} 70.5
+DCGM_FI_DEV_GPU_UTIL{gpu="0",UUID="GPU-x",device="nvidia0",modelName="NVIDIA L4",Hostname="h"} 99
+DCGM_FI_DEV_FB_FREE{gpu="0",UUID="GPU-x",device="nvidia0",modelName="NVIDIA L4",Hostname="h"} 2000
+DCGM_FI_DEV_FB_USED{gpu="0",UUID="GPU-x",device="nvidia0",modelName="NVIDIA L4",Hostname="h"} 20563

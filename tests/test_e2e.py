@@ -317,3 +317,78 @@ def test_custom_command_engine_starts_and_stops_server(env):
         assert res[("command", "code.tg")]["value"] == 26.0
     assert kill_all() == []  # the server the command started is gone
 
+
+def _serve_exporters(*names):
+    """A tiny HTTP server answering /metrics with the given exporter fixtures concatenated."""
+    import http.server
+    import threading
+    from pathlib import Path
+    text = "".join((Path(__file__).resolve().parent / "fakes" / "exporters" / n).read_text() for n in names).encode()
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(text)
+    srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, f"http://127.0.0.1:{srv.server_address[1]}/metrics"
+
+
+def test_remote_server_with_exporter_telemetry(env):
+    srv, port = _fake_server("--no-timings")
+    exp, exp_url = _serve_exporters("node_exporter.prom", "nvidia_gpu_exporter.prom")
+    try:
+        url = f"http://127.0.0.1:{port}/v1"
+        with make_client() as c:
+            login(c)
+            for _ in range(50):
+                r = c.post("/api/runs", json={"engine": "external", "server_url": url, "gpus": [],
+                                              "telemetry_urls": f"{exp_url} ", "abort_on": [],
+                                              "modules": {"server": {"reps": 1, "max_tokens": 64}}})
+                if r.status_code == 200:
+                    break
+                time.sleep(0.1)
+            run = r.json()
+            assert run["spec"]["telemetry_urls"] == [exp_url] and run["spec"]["remote_gpus"] == [0, 1]
+            assert not run["preflight"]["block"], run["preflight"]
+            assert c.post(f"/api/runs/{run['id']}/start").status_code == 200
+            assert wait_done(c, run["id"]) == "done"
+            d = c.get(f"/api/runs/{run['id']}").json()
+            assert d["run"]["snapshot"]["remote"]["gpus"][1]["name"] == "Tesla P100-PCIE-16GB"
+            assert "serial" not in json.dumps(d["run"]["snapshot"]["remote"])
+            from benchkit import export
+            assert export.hardware_line(d["run"]["snapshot"]).startswith("remote: 2x Tesla P100-PCIE-16GB")
+            tel = c.get(f"/api/runs/{run['id']}/telemetry").json()
+            assert tel and tel[-1]["gpus"]["1"]["temp_c"] == 71.0 and tel[-1]["mem"]["avail_gb"] == 20.0
+        bad = None
+        with make_client() as c:
+            login(c)
+            bad = c.post("/api/runs", json={"engine": "external", "server_url": url, "gpus": [],
+                                            "telemetry_urls": ["ftp://x"], "modules": {"server": {}}})
+        assert bad.status_code == 400 and "telemetry URLs" in bad.json()["detail"]
+    finally:
+        srv.kill()
+        exp.shutdown()
+
+
+def test_bundled_engine_blocked_on_amd_gpu(env):
+    import os
+    from pathlib import Path
+    from test_units import _fake_amd_card
+    _fake_amd_card(Path(os.environ["BENCHKIT_SYSFS_ROOT"]), 0, "0a")
+    with make_client() as c:
+        login(c)
+        gpus = c.get("/api/system?refresh=1").json()["snapshot"]["gpus"]
+        assert [g["vendor"] for g in gpus] == ["NVIDIA", "NVIDIA", "AMD"]
+        mid = c.get("/api/models").json()["custom"][0]["id"]
+        r = c.post("/api/runs", json={"model": mid, "engine": "fake", "gpus": [2], "modules": {"server": {"reps": 1}}}).json()
+        assert any("CUDA only" in b for b in r["preflight"]["block"])
+        bad = c.post("/api/runs", json={"model": mid, "engine": "fake", "gpus": [2], "power_cap": 150,
+                                        "modules": {"server": {}}})
+        assert bad.status_code == 400
+

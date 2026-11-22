@@ -25,6 +25,9 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("BENCHKIT_MODELS_DIR", str(models))
     monkeypatch.setenv("BENCHKIT_ENGINES_DIR", str(FAKES / "engines"))
     monkeypatch.setenv("BENCHKIT_TOKEN", "test-token")
+    sysfs = tmp_path / "sysfs"
+    (sysfs / "class" / "drm").mkdir(parents=True)
+    monkeypatch.setenv("BENCHKIT_SYSFS_ROOT", str(sysfs))  # tests add fake AMD cards here when they need them
     monkeypatch.setenv("BENCHKIT_COOLDOWN_C", "90")
     monkeypatch.setenv("BENCHKIT_SERVER_PORT", str(18000 + os.getpid() % 1000))
     monkeypatch.setenv("BENCHKIT_HERMES_PYTHON", str(FAKES / "bin" / "fake-hermes-python"))

@@ -364,7 +364,8 @@ class CommandServer(ExternalServer):
 
     def start(self, timeout: float = 1800) -> None:
         self.ctx.log("runner", "starting: " + shlex.join(self.argv))
-        env = {"CUDA_VISIBLE_DEVICES": ",".join(str(g) for g in self.ctx.gpus)} if self.ctx.gpus else {}
+        from .hw import visible_devices_env  # CUDA_VISIBLE_DEVICES / HIP_VISIBLE_DEVICES, per vendor
+        env = visible_devices_env((self.ctx.snapshot or {}).get("gpus") or [], self.ctx.gpus) if self.ctx.gpus else {}
         try:
             self.proc = Proc(self.argv, env=env, on_line=self._on_line)
         except OSError as e:

@@ -102,7 +102,7 @@ def _record_rates(ctx, module: str, rep: int, task: str, r: dict, variant: str =
 class AgentModule(Module):
     name = "agent"
     label = "Agent battery (Hermes)"
-    description = "Hermes agent tool-use trap tasks; reports pass rate and wall time per task."
+    description = "Hermes agent tool-use trap tasks; pass rate and wall time per task, plus prefill and decode where the server reports them."
 
     def __init__(self, hermes_source: Path | None = None):
         src = hermes_source or Path(os.environ.get("BENCHKIT_HERMES_SOURCE", "/opt/hermes-agent"))

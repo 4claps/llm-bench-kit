@@ -1,0 +1,19 @@
+# HELP nvidia_smi_temperature_gpu temperature.gpu [C]
+nvidia_smi_clocks_current_memory_clock_hz{uuid="aaaa-0"} 7.15e+08
+nvidia_smi_clocks_current_memory_clock_hz{uuid="bbbb-1"} 7.15e+08
+nvidia_smi_clocks_current_sm_clock_hz{uuid="aaaa-0"} 1.189e+09
+nvidia_smi_clocks_current_sm_clock_hz{uuid="bbbb-1"} 1.328e+09
+nvidia_smi_gpu_info{compute_cap="6.0",driver_version="580.1",index="0",name="Tesla P100-PCIE-16GB",serial="000",uuid="aaaa-0"} 1
+nvidia_smi_gpu_info{compute_cap="6.0",driver_version="580.1",index="1",name="Tesla P100-PCIE-16GB",serial="111",uuid="bbbb-1"} 1
+nvidia_smi_index{uuid="aaaa-0"} 0
+nvidia_smi_index{uuid="bbbb-1"} 1
+nvidia_smi_memory_total_bytes{uuid="aaaa-0"} 1.7179869184e+10
+nvidia_smi_memory_total_bytes{uuid="bbbb-1"} 1.7179869184e+10
+nvidia_smi_memory_used_bytes{uuid="aaaa-0"} 1.6872636416e+10
+nvidia_smi_memory_used_bytes{uuid="bbbb-1"} 1.6872636416e+10
+nvidia_smi_power_draw_instant_watts{uuid="aaaa-0"} 37.99
+nvidia_smi_power_draw_instant_watts{uuid="bbbb-1"} 142.01
+nvidia_smi_temperature_gpu{uuid="aaaa-0"} 58
+nvidia_smi_temperature_gpu{uuid="bbbb-1"} 71
+nvidia_smi_utilization_gpu_ratio{uuid="aaaa-0"} 0
+nvidia_smi_utilization_gpu_ratio{uuid="bbbb-1"} 0.97

@@ -42,7 +42,7 @@ def prompts() -> dict[str, str]:
 class ServerModule(Module):
     name = "server"
     label = "Server (real requests)"
-    description = "llama-server prompt processing and generation on a ~2k-token prose prompt and a code prompt."
+    description = "Real chat requests: prefill and decode tokens/s on a ~2k-token prose prompt and a code prompt."
     params = {
         "reps": {"type": "int", "default": 3, "min": 1, "max": 10, "label": "Runs"},
         "mtp": {"type": "multi", "default": ["off", "on"], "choices": ["off", "on"], "label": "MTP"},

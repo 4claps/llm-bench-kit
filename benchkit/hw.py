@@ -161,6 +161,26 @@ def can_set_power() -> bool:
     return os.geteuid() == 0 and bool(m) and bool(int(m.group(1), 16) >> 21 & 1)
 
 
+def by_vendor(gpus: list[dict], picked: list[int]) -> dict[str, list[int]]:
+    """{"NVIDIA": [vendor indexes], "AMD": [...]} for the kit's GPU indexes in picked."""
+    out: dict[str, list[int]] = {}
+    for g in gpus:
+        if g.get("index") in picked:
+            out.setdefault(g.get("vendor", "NVIDIA"), []).append(g.get("vendor_index", g.get("index")))
+    return out
+
+
+def visible_devices_env(gpus: list[dict], picked: list[int]) -> dict:
+    """CUDA_VISIBLE_DEVICES / HIP_VISIBLE_DEVICES for the picked GPUs, per vendor."""
+    v = by_vendor(gpus, picked)
+    env = {}
+    if "NVIDIA" in v or not v:
+        env["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in v.get("NVIDIA", []))
+    if "AMD" in v:
+        env["HIP_VISIBLE_DEVICES"] = ",".join(str(i) for i in v["AMD"])
+    return env
+
+
 def set_power_limit(gpu: int, watts: float) -> tuple[bool, str]:
     return run_cmd(["nvidia-smi", "-i", str(gpu), "-pl", f"{watts:g}"])
 
@@ -171,7 +191,18 @@ def snapshot(engines: list[dict] | None = None) -> dict:
     ok, out = run_cmd(["nvidia-smi", f"--query-gpu={','.join(GPU_FIELDS)}",
                        "--format=csv,noheader,nounits"])
     snap["gpus"] = parse_gpu_csv(out) if ok else []
-    if not ok:
+    for g in snap["gpus"]:
+        g["vendor"], g["vendor_index"] = "NVIDIA", g.get("index")
+    from . import amdgpu  # AMD GPUs (amdgpu sysfs) follow the NVIDIA ones: kit index = NVIDIA count + AMD index
+    for g in amdgpu.snapshot_gpus():
+        g["vendor_index"] = g["index"]
+        g["index"] = len(snap["gpus"])
+        snap["gpus"].append(g)
+    vendors = sorted({g["vendor"] for g in snap["gpus"]})
+    snap["gpu_vendor"] = "+".join(vendors) or None
+    if not ok and snap["gpus"]:
+        snap["errors"].pop("gpus", None)
+    elif not ok:
         snap["errors"]["gpus"] = out
     ok, out = run_cmd(["nvidia-smi"])
     m = re.search(r"CUDA Version:\s*([\d.]+)", out) if ok else None

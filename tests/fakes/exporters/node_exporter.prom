@@ -1,0 +1,16 @@
+# HELP node_cpu_seconds_total Seconds the CPUs spent in each mode.
+node_cpu_seconds_total{cpu="0",mode="idle"} 1000
+node_cpu_seconds_total{cpu="0",mode="iowait"} 10
+node_cpu_seconds_total{cpu="0",mode="user"} 300
+node_cpu_seconds_total{cpu="1",mode="idle"} 1000
+node_cpu_seconds_total{cpu="1",mode="user"} 300
+node_cpu_scaling_frequency_hertz{cpu="0"} 1.2e+09
+node_cpu_scaling_frequency_hertz{cpu="1"} 1.8e+09
+node_hwmon_chip_names{chip="0000:00:01_0_0000:01:00_0",chip_name="mpt3sas"} 1
+node_hwmon_chip_names{chip="platform_coretemp_0",chip_name="coretemp"} 1
+node_hwmon_temp_celsius{chip="0000:00:01_0_0000:01:00_0",sensor="temp1"} 61
+node_hwmon_temp_celsius{chip="platform_coretemp_0",sensor="temp1"} 55
+node_hwmon_temp_celsius{chip="platform_coretemp_0",sensor="temp2"} 44
+node_memory_MemAvailable_bytes 2.147483648e+10
+node_memory_MemTotal_bytes 1.34217728e+11
+node_uname_info{machine="x86_64",nodename="box",release="6.9.0",sysname="Linux"} 1

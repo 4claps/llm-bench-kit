@@ -1,0 +1,3 @@
+node_drm_gpu_busy_percent{card="card0"} 87
+node_drm_memory_vram_used_bytes{card="card0"} 8.589934592e+09
+node_drm_memory_vram_size_bytes{card="card0"} 1.7163091968e+10

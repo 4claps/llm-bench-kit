@@ -1,5 +1,5 @@
-"""Live telemetry sampled locally: nvidia-smi for GPUs, /proc and /sys for
-CPU, memory, fans. One sample per interval, shaped as
+"""Live telemetry sampled locally: nvidia-smi for NVIDIA GPUs (amdgpu sysfs files
+for AMD ones when there are no NVIDIA GPUs), /proc and /sys for CPU, memory, fans. One sample per interval, shaped as
 
     {"t": epoch, "gpus": {"0": {"temp_c": .., "sm_mhz": ..}, ...},
      "cpu": {"util_pct": .., "mhz": .., "temp_c": .., "power_w": ..},
@@ -28,6 +28,7 @@ METRICS = [
     {"id": "gpu.util_pct", "label": "GPU utilization", "unit": "%", "scope": "gpu", "key": "util_pct"},
     {"id": "gpu.mem_util_pct", "label": "GPU memory-bus utilization", "unit": "%", "scope": "gpu", "key": "mem_util_pct"},
     {"id": "gpu.vram_mb", "label": "GPU VRAM used", "unit": "MiB", "scope": "gpu", "key": "vram_mb"},
+    {"id": "gpu.gtt_mb", "label": "GPU shared memory (GTT) used, AMD", "unit": "MiB", "scope": "gpu", "key": "gtt_mb"},
     {"id": "gpu.fan_pct", "label": "GPU fan", "unit": "%", "scope": "gpu", "key": "fan_pct"},
     {"id": "gpu.pcie_gen", "label": "PCIe link gen", "unit": "", "scope": "gpu", "key": "pcie_gen"},
     {"id": "gpu.pcie_width", "label": "PCIe link width", "unit": "x", "scope": "gpu", "key": "pcie_width"},
@@ -84,14 +85,26 @@ class Sampler:
         self._rapl_path = next(iter(glob.glob("/sys/class/powercap/intel-rapl:0/energy_uj")), None)
 
     def _gpus(self) -> dict:
+        nv = self._nvidia()
+        from . import amdgpu  # after the NVIDIA GPUs, numbered on from them (as in hw.snapshot)
+        amd = amdgpu.sample_gpus() if amdgpu.cards() else {}
+        return {**nv, **{str(len(nv) + int(k)): v for k, v in amd.items()}}
+
+    def _nvidia(self) -> dict:
+        if getattr(self, "_no_nvidia", False):
+            return {}
         fields = ",".join(f for f, _ in self._gpu_query)
         ok, out = run_cmd(["nvidia-smi", f"--query-gpu={fields}", "--format=csv,noheader,nounits"], timeout=10)
         if not ok and "clocks_event_reasons" in fields:
             # older drivers only know the pre-rename field
             self._gpu_query = [(("clocks_throttle_reasons.active" if f.startswith("clocks_event") else f), k)
                                for f, k in self._gpu_query]
-            return self._gpus()
-        return parse_gpu_sample(out) if ok else {}
+            return self._nvidia()
+        if ok:
+            return parse_gpu_sample(out)
+        if "not found" in out:  # no nvidia-smi at all: don't try again every second
+            self._no_nvidia = True
+        return {}
 
     def _cpu(self) -> dict:
         cpu: dict = {}
