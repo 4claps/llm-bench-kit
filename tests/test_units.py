@@ -509,3 +509,21 @@ def test_mixed_nvidia_and_amd(env):
     assert hw.visible_devices_env(snap["gpus"], [2]) == {"HIP_VISIBLE_DEVICES": "0"}
     assert set(Sampler().sample()["gpus"]) == {"0", "1", "2"}
 
+
+def test_discover_exporters_on_server_host():
+    from benchkit import promtel
+    from test_e2e import _serve_exporters
+    node, node_url = _serve_exporters("node_exporter.prom")
+    nv, nv_url = _serve_exporters("nvidia_gpu_exporter.prom")
+    try:
+        port = lambda u: int(u.split(":")[2].split("/")[0])
+        # the kinds are told apart by content, not by which port they happen to be on
+        ports = {port(node_url): "x", port(nv_url): "y", 9: "nothing listens"}
+        found = promtel.discover("http://127.0.0.1:8080/v1", ports=ports)
+        assert sorted((f["kind"], f["url"]) for f in found) == sorted([("node_exporter", node_url), ("nvidia_gpu_exporter", nv_url)])
+        assert promtel.discover("https://8.8.8.8/v1", ports=ports) == []  # public hosts are never probed
+        assert promtel.discover("not a url") == []
+    finally:
+        node.shutdown()
+        nv.shutdown()
+

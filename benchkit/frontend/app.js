@@ -250,7 +250,8 @@ async function viewRun(_, gen = state.gen) {
       <button class="secondary" id="r-load-models" style="align-self:flex-end">Load models</button>
     </div>
     <div class="row">
-      <label class="field" style="flex:1"><span>Telemetry exporters on that machine (optional, space-separated)</span><input type="text" id="r-telurls" placeholder="http://10.0.0.5:9100/metrics http://10.0.0.5:9835/metrics"></label>
+      <label class="field" style="flex:1"><span>Telemetry exporters on that machine (found automatically from the server URL; space-separated)</span><input type="text" id="r-telurls" placeholder="http://10.0.0.5:9100/metrics http://10.0.0.5:9835/metrics"></label>
+      <button class="secondary" id="r-find-exp" style="align-self:flex-end">Find exporters</button>
     </div>
     <details class="small muted" style="margin-top:8px"><summary>How remote runs are measured</summary>
       <p>Only the server and agent modules run, and results are marked not comparable. Prefill and decode come from the server's own timings when it sends them (llama-server, Strata), else from streaming arrival times, which include the network. With exporters (node_exporter for CPU and RAM; nvidia_gpu_exporter or DCGM for NVIDIA GPUs; node_exporter's drm collector for AMD) the run gets that machine's charts, guardrails and hardware record; without them it has no GPU telemetry or guardrails. The key is kept in memory for this run only.</p></details>
@@ -284,7 +285,9 @@ async function viewRun(_, gen = state.gen) {
   $$(".module").forEach((el) => $(".mod-on", el).addEventListener("change", (e) => el.classList.toggle("off", !e.target.checked)));
   $("#r-review").onclick = reviewRun;
   $("#r-engine").addEventListener("change", syncEngine);
-  $("#r-load-models").onclick = loadRemoteModels;
+  $("#r-load-models").onclick = () => { loadRemoteModels(); findExporters(true); };
+  $("#r-find-exp").onclick = () => findExporters(false);
+  $("#r-url").addEventListener("change", () => findExporters(true));
   try { $("#r-launch").value = localStorage.getItem("benchkit.launch_cmd") || ""; } catch (_) { /* no storage */ }
   $("#r-telurls").addEventListener("input", syncEngine);
   let tab = "local";
@@ -357,6 +360,20 @@ function syncEngine() {
     box.disabled = reqOnly;
     if (reqOnly && box.checked) { box.checked = false; el.classList.add("off"); }
   }
+}
+
+async function findExporters(quiet) {
+  // exporters on the server's own host; quiet = automatic: only fills an empty field and says nothing on a miss
+  const url = $("#r-url").value.trim();
+  if (!url || (quiet && $("#r-telurls").value.trim())) return;
+  try {
+    const r = await api("/remote/exporters", { method: "POST", json: { url } });
+    if (r.exporters.length) {
+      $("#r-telurls").value = r.exporters.map((e) => e.url).join(" ");
+      syncEngine();
+      toast("Exporters found: " + r.exporters.map((e) => e.kind).join(", "));
+    } else if (!quiet) toast("No exporters found on that host (ports 9100, 9835, 9400; private networks only)");
+  } catch (e) { if (!quiet) toast(e.message || String(e)); }
 }
 
 async function loadRemoteModels() {

@@ -120,7 +120,11 @@ tools). Things to know:
   off it during a run; on Strata the request count is stored with each task.
 - For a server on another machine, leave the GPUs unticked. To still get
   that machine's GPU, CPU and RAM charts and guardrails, list its Prometheus
-  exporters under **Telemetry exporters** (space-separated `/metrics` URLs):
+  exporters under **Telemetry exporters** (space-separated `/metrics` URLs).
+  The kit fills them in by itself when you enter the server URL: it checks
+  the same host on ports 9100, 9835 and 9400 and keeps what answers with
+  exporter metrics (only for private-network and local hosts, never a
+  hosted API's); an exporter on another port can be typed in. Use
   node_exporter (`:9100`) for CPU and RAM (and AMD GPUs through its drm
   collector), plus nvidia_gpu_exporter (`:9835`) or NVIDIA's DCGM exporter
   (`:9400`) for NVIDIA GPUs. The result file then records that machine's
