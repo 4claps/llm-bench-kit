@@ -4,12 +4,17 @@ Fixed prompts at temperature 0 with a fixed seed and a fixed output length
 (ignore_eos), so every machine generates the same number of tokens. MTP
 draft acceptance still varies a little run to run; report medians.
 
-Against an external server (another engine) the MTP choice is the server's
-own business, so there is one pass labelled "external". Each prompt gets a
-unique prefix so a server that ignores cache_prompt (Strata keeps its own
-conversation cache) cannot reuse an earlier read of it. Such servers may also
-ignore ignore_eos and stop early; the token counts are stored beside every
-rate, so check them before comparing.
+Against a remote server or one started from a custom command, MTP and the
+rest are the server's own business, so there is one pass labelled "external"
+or "command". Those requests are streamed: prefill and decode come from the
+server's own llama.cpp-style timings when it sends them, else from arrival
+timing (prefill = prompt tokens / time to first token, decode = tokens after
+the first / time from first to last), which works on any OpenAI-compatible
+server; extra.method says which. Each prompt gets a unique prefix so a server
+that ignores cache_prompt (Strata keeps its own conversation cache) cannot
+reuse an earlier read of it. Such servers may also ignore ignore_eos and stop
+early; the token counts are stored beside every rate, so check them before
+comparing.
 """
 
 from __future__ import annotations
@@ -17,7 +22,8 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 
-from ..llserver import open_server
+from ..engines import requests_only
+from ..llserver import open_server, stream_rates
 from .base import Module, load_s
 
 PROMPTS_DIR = Path(__file__).resolve().parents[1] / "prompts"
@@ -46,7 +52,7 @@ class ServerModule(Module):
     }
 
     def check(self, p, model, engine, snapshot):
-        if engine.get("external"):
+        if requests_only(engine):
             return []  # the server decides about MTP
         probs = []
         if "on" in p["mtp"] and model is not None and not model.get("mtp"):
@@ -60,31 +66,34 @@ class ServerModule(Module):
 
     def run(self, ctx, p):
         P = prompts()
-        external = bool(ctx.engine.get("external"))
-        variants = ["external"] if external else p["mtp"]
+        external = requests_only(ctx.engine)
+        variants = [ctx.engine["name"]] if external else p["mtp"]
         steps = len(variants) * p["reps"]
         step = 0
         for mtp in variants:
             ctx.cool_down()
             with open_server(ctx, ["-ctk", p["kv"], "-ctv", p["kv"]], p["ctx"], mtp=(mtp == "on")) as srv:
-                srv.chat({"messages": [{"role": "user", "content": "Say hello."}], "max_tokens": 16,
-                          "cache_prompt": False})  # warmup, discarded
+                warm = {"messages": [{"role": "user", "content": "Say hello."}], "max_tokens": 16, "cache_prompt": False}
+                srv.stream(warm) if external else srv.chat(warm)  # warmup, discarded
                 for rep in range(p["reps"]):
                     step += 1
-                    ctx.progress(self.name, step, steps, f"{'external' if external else 'MTP ' + mtp}, run {rep + 1}")
+                    ctx.progress(self.name, step, steps, f"{mtp if external else 'MTP ' + mtp}, run {rep + 1}")
                     if rep:
                         ctx.cool_down()
                     for pname, text in P.items():
                         if ctx.abort.is_set():
                             return
+                        body = {"messages": [{"role": "user", "content": text}],
+                                "max_tokens": p["max_tokens"], "temperature": 0, "seed": 42,
+                                "ignore_eos": True, "cache_prompt": False,
+                                "chat_template_kwargs": {"enable_thinking": False}}
                         if external:
-                            text = f"[run {uuid.uuid4().hex}] {text}"
-                        j = srv.chat({"messages": [{"role": "user", "content": text}],
-                                      "max_tokens": p["max_tokens"], "temperature": 0, "seed": 42,
-                                      "ignore_eos": True, "cache_prompt": False,
-                                      "chat_template_kwargs": {"enable_thinking": False}})
+                            body["messages"][0]["content"] = f"[run {uuid.uuid4().hex}] {text}"
+                            self._record_stream(ctx, rep, mtp, pname, stream_rates(srv.stream(body)))
+                            continue
+                        j = srv.chat(body)
                         t = j.get("timings") or {}
-                        var = "external" if external else f"mtp={mtp}"
+                        var = f"mtp={mtp}"
                         ctx.result(self.name, rep, var, f"{pname}.pp", t.get("prompt_per_second"), "t/s",
                                    {"tokens": t.get("prompt_n"),
                                     **({"cached": t["cache_n"]} if t.get("cache_n") is not None else {})})
@@ -94,3 +103,12 @@ class ServerModule(Module):
                             ctx.result(self.name, rep, var, f"{pname}.draft_accept",
                                        round(t["draft_n_accepted"] / t["draft_n"], 4), "",
                                        {"draft_n": t["draft_n"], "accepted": t["draft_n_accepted"]})
+
+    def _record_stream(self, ctx, rep, var, pname, r):
+        """One streamed request's prefill/decode (server timings or arrival timing; extra.method says which)."""
+        extra = {"method": r["method"], **({"cached": r["cached"]} if r.get("cached") is not None else {})}
+        ctx.result(self.name, rep, var, f"{pname}.pp", r["pp"], "t/s", {"tokens": r["prompt_tokens"], **extra})
+        ctx.result(self.name, rep, var, f"{pname}.tg", r["tg"], "t/s", {"tokens": r["gen_tokens"], "method": r["method"]})
+        if r.get("draft_n"):
+            ctx.result(self.name, rep, var, f"{pname}.draft_accept", round(r["draft_accepted"] / r["draft_n"], 4), "",
+                       {"draft_n": r["draft_n"], "accepted": r["draft_accepted"]})

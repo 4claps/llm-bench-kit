@@ -50,6 +50,7 @@ class RunContext:
         self.abort = threading.Event()
         self.abort_reason = ""
         self.power_restore: dict[int, float] = {}
+        self.api_key = ""  # a remote server's key, typed on New Run: memory only, never stored
         self.server_live: dict = {}
         self._log_buf: list[tuple[str, str]] = []
         self._log_lock = threading.Lock()
@@ -97,7 +98,12 @@ class RunContext:
             self.server_live["draft_accept"] = ev.acceptance
 
     def cool_down(self) -> None:
-        """Wait until the run's GPUs are at or below the cool-down temperature."""
+        """Wait until the run's GPUs are at or below the cool-down temperature.
+
+        Skipped with no GPUs ticked, and for a remote server: it keeps its model loaded, so GPUs it runs on here
+        never cool down and the wait would only burn the timeout."""
+        if not self.gpus or self.engine.get("external"):
+            return
         t0 = time.time()
         sampler = Sampler()
         while not self.abort.is_set():
@@ -124,6 +130,7 @@ class Runner:
         self._subs: list[tuple[asyncio.AbstractEventLoop, asyncio.Queue]] = []
         self._lock = threading.Lock()
         self.snapshot_cache: dict | None = None
+        self._keys: dict[str, str] = {}  # run id -> remote server API key, until the run starts (memory only)
 
     # ---------------- pub/sub for SSE ----------------
     def subscribe(self) -> asyncio.Queue:
@@ -164,18 +171,26 @@ class Runner:
         engine = self.engine(str(spec.get("engine") or ""))
         if not engine:
             raise ValueError("pick an available engine")
-        server_url = server_model = ""
+        server_url = server_model = launch_cmd = ""
         if engine.get("external"):
             server_url = str(spec.get("server_url") or "").strip().rstrip("/")
             if not server_url.startswith(("http://", "https://")):
-                raise ValueError("the external engine needs a server URL such as http://10.0.0.5:8080")
-            ok, server_model, msg = probe_external(server_url)
+                raise ValueError("the remote engine needs a server URL such as http://10.0.0.5:8080/v1")
+            ok, server_model, msg = probe_external(server_url, key=str(spec.get("server_key") or ""))
             if not ok:
-                raise ValueError(f"external server not reachable: {msg}")
+                raise ValueError(f"server not reachable: {msg}")
             server_model = str(spec.get("server_model") or "").strip()[:200] or server_model
+        if engine.get("command"):
+            launch_cmd = str(spec.get("launch_cmd") or "").strip()
+            if not launch_cmd or "{port}" not in launch_cmd:
+                raise ValueError("the custom command engine needs a launch command with {port} in it, "
+                                 "e.g. vllm serve {model} --port {port}")
+            if len(launch_cmd) > 4000:
+                raise ValueError("launch command is too long (4000 characters at most)")
+            server_model = str(spec.get("server_model") or "").strip()[:200]
         n_gpus = len(self.snapshot().get("gpus") or [])
         gpus = sorted({int(g) for g in spec.get("gpus") or []})
-        if not gpus:
+        if not gpus and not engines_mod.requests_only(engine):
             raise ValueError("pick at least one GPU")
         if n_gpus and any(g < 0 or g >= n_gpus for g in gpus):
             raise ValueError(f"GPU index out of range (0..{n_gpus - 1})")
@@ -191,6 +206,13 @@ class Runner:
             raise ValueError(f"unknown modules: {sorted(unknown)}")
         if engine.get("external"):
             model_id, comparable = f"external: {server_model or 'unknown model'}", False
+        elif engine.get("command") and not model_id:
+            model_id, comparable = f"command: {server_model or 'named by the command'}", False
+        elif engine.get("command"):
+            path, _ = self.store.model_path(model_id)
+            if path is None:
+                raise ValueError("model is not present on this machine (download it first, or pick none)")
+            comparable = False
         else:
             path, comparable = self.store.model_path(model_id)
             if path is None:
@@ -216,6 +238,8 @@ class Runner:
         # both guardrails abort by default; an explicit [] turns them off
         abort_on = [a for a in spec.get("abort_on", ["low_clock", "thermal"]) or [] if a in ("low_clock", "thermal")]
         power_cap = spec.get("power_cap")
+        if power_cap not in (None, "") and not gpus:
+            raise ValueError("a power cap needs GPUs ticked")
         if power_cap not in (None, ""):
             try:
                 power_cap = int(power_cap)
@@ -235,12 +259,19 @@ class Runner:
                 "split": split or engine.get("multi_gpu_split", "layer"), "abort_on": abort_on,
                 "label": str(spec.get("label") or "")[:120], "comparable": comparable, "power_cap": power_cap,
                 "ngl": ngl,
-                **({"server_url": server_url, "server_model": server_model} if engine.get("external") else {})}
+                **({"server_url": server_url, "server_model": server_model} if engine.get("external") else {}),
+                **({"launch_cmd": launch_cmd, "server_model": server_model} if engine.get("command") else {})}
 
     def estimate(self, spec: dict) -> int:
-        path = None if spec.get("server_url") else self.store.model_path(spec["model"])[0]
+        path = self._model_file(spec)
         gb = path.stat().st_size / 1e9 if path else 10
         return sum(MODULES[n].estimate_s(p, gb) for n, p in spec["modules"].items())
+
+    def _model_file(self, spec: dict) -> Path | None:
+        """The model file the run loads, or None (remote server, or a custom command that names its own model)."""
+        if spec.get("server_url") or str(spec.get("model", "")).startswith("command: "):
+            return None
+        return self.store.model_path(spec["model"])[0]
 
     def preflight(self, spec: dict) -> dict:
         """Checks before starting. 'block' items stop the run; 'warn' items are shown."""
@@ -248,19 +279,27 @@ class Runner:
         snap = self.snapshot(refresh=True)
         engine = self.engine(spec["engine"])
         external = bool(engine and engine.get("external"))
-        model_meta = None if external else self.store.get(spec["model"])
+        command = bool(engine and engine.get("command"))
+        model_meta = None if external or self._model_file(spec) is None else self.store.get(spec["model"])
         status = self.store.status(model_meta) if model_meta else None
         if self.active:
             block.append(f"run {self.active.run_id} is still running")
         if external:
-            ok, _, msg = probe_external(spec["server_url"])
+            ok, _, msg = probe_external(spec["server_url"], key=self._keys.get(spec.get("_run_id", ""), ""))
             if not ok:
-                block.append(f"external server not reachable: {msg}")
-            warn.append("external server: the kit only sends requests; GPU numbers are only meaningful if "
-                        "the selected GPUs are the ones that server runs on, on this machine")
+                block.append(f"server not reachable: {msg}")
+            if spec["gpus"]:
+                warn.append("remote server: GPU telemetry and guardrails watch the GPUs ticked here, so tick only "
+                            "the ones that server runs on, on this machine")
+            else:
+                warn.append("remote server with no local GPUs ticked: no GPU telemetry, guardrails or cool-down")
+        if command:
+            warn.append("custom command: the kit runs your command as is; results are marked not comparable")
+            if not spec["gpus"]:
+                warn.append("no GPUs ticked: the command runs with no GPU telemetry or guardrails")
         if model_meta and status and not status["verified"]:
             warn.append("model checksum not verified yet (Models page → Verify); results may not be comparable")
-        if not spec["comparable"] and not external:
+        if not spec["comparable"] and not external and not command:
             warn.append("custom model: results are marked not comparable with other machines")
         for name, p in spec["modules"].items():
             for prob in MODULES[name].check(p, model_meta, engine, snap):
@@ -272,7 +311,7 @@ class Runner:
             busy = [l for l in out.strip().splitlines() if any(u in l for u in uuids)]
             if busy:
                 block.append("selected GPUs are in use by other processes: " + "; ".join(busy)[:300])
-        if not snap.get("gpus"):
+        if not snap.get("gpus") and spec["gpus"]:
             block.append("no NVIDIA GPUs visible (start the container with --gpus all)")
         free = shutil.disk_usage(self.cfg.data_dir).free
         if free < 5e9:
@@ -314,9 +353,12 @@ class Runner:
     def create(self, spec_in: dict) -> dict:
         spec = self.validate(spec_in)
         run_id = time.strftime("%Y%m%d-%H%M%S-") + secrets.token_hex(3)
+        key = str(spec_in.get("server_key") or "").strip()
+        if key:
+            self._keys[run_id] = key
         est = self.estimate(spec)
         self.db.create_run(run_id, spec, est)
-        return {"id": run_id, "spec": spec, "estimate_s": est, "preflight": self.preflight(spec)}
+        return {"id": run_id, "spec": spec, "estimate_s": est, "preflight": self.preflight({**spec, "_run_id": run_id})}
 
     def start(self, run_id: str) -> None:
         with self._lock:
@@ -326,16 +368,16 @@ class Runner:
             if self.active:
                 raise ValueError("another run is active")
             spec = run["spec"]
-            pf = self.preflight(spec)
+            pf = self.preflight({**spec, "_run_id": run_id})
             if pf["block"]:
                 raise ValueError("preflight blocked: " + "; ".join(pf["block"]))
             restore = self._apply_power_cap(spec)
             snap = self.snapshot(refresh=bool(restore))  # so the run records the cap it ran at
-            external = bool(spec.get("server_url"))
-            path = None if external else self.store.model_path(spec["model"])[0]
+            path = self._model_file(spec)
             ctx = RunContext(self, run_id, spec, self.engine(spec["engine"]), path,
-                             None if external else self.store.get(spec["model"]), snap)
+                             self.store.get(spec["model"]) if path else None, snap)
             ctx.power_restore = restore
+            ctx.api_key = self._keys.pop(run_id, "")
             self.active = ctx
             self.db.update_run(run_id, status="running", started_at=time.time(),
                                snapshot_json=json.dumps(snap))

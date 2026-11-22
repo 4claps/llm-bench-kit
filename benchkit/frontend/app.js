@@ -1,5 +1,5 @@
 "use strict";
-// P100 Bench Kit UI. Plain JS, no build step. All server text goes through
+// LLM Bench Kit UI. Plain JS, no build step. All server text goes through
 // esc() or textContent; the API is same-origin with a session cookie.
 
 const $ = (s, el = document) => el.querySelector(s);
@@ -216,10 +216,17 @@ async function viewRun(_, gen = state.gen) {
       <label class="field" style="flex:1"><span>Label (optional)</span><input type="text" id="r-label" maxlength="120"></label>
     </div>
     <div class="row" id="r-ext" hidden>
-      <label class="field" style="flex:2"><span>Server URL</span><input type="text" id="r-url" placeholder="http://10.0.0.5:8080"></label>
-      <label class="field" style="flex:1"><span>Model id (optional)</span><input type="text" id="r-smodel" placeholder="asked from the server"></label>
+      <label class="field" style="flex:2"><span>Server URL</span><input type="text" id="r-url" placeholder="http://10.0.0.5:8080/v1"></label>
+      <label class="field" style="flex:1"><span>API key (if it needs one; not saved)</span><input type="password" id="r-key" autocomplete="off"></label>
+      <label class="field" style="flex:2"><span>Model id</span><input type="text" id="r-smodel" list="r-smodels" placeholder="first one the server lists"><datalist id="r-smodels"></datalist></label>
+      <button class="secondary" id="r-load-models" style="align-self:flex-end">Load models</button>
     </div>
-    <div class="small muted" id="r-ext-note" hidden>An OpenAI-compatible server that is already running, such as another engine. Only the server and agent modules run; results are marked not comparable. Tick the GPUs that server uses on this machine so telemetry and guardrails watch the right cards.</div>
+    <div class="small muted" id="r-ext-note" hidden>Any OpenAI-compatible server that is already running, on this machine or another: llama-server, vLLM, SGLang, Ollama, LM Studio, Strata or a hosted API. Only the server and agent modules run, and results are marked not comparable. Prefill and decode come from the server's own timings when it sends them, else from streaming arrival times. Leave the GPUs unticked for a server on another machine; tick the ones it uses if it runs here, to get telemetry and guardrails. The key is kept in memory for this run only.</div>
+    <div class="row" id="r-cmd" hidden>
+      <label class="field" style="flex:4"><span>Launch command</span><input type="text" id="r-launch" placeholder="vllm serve {model} --port {port} --max-model-len {ctx}"></label>
+      <label class="field" style="flex:1"><span>Model id (optional)</span><input type="text" id="r-cmodel" placeholder="asked from the server"></label>
+    </div>
+    <div class="small muted" id="r-cmd-note" hidden>Any engine with an OpenAI-compatible server, started here: the kit runs the command, waits until <code>/v1/models</code> answers, benchmarks it with full telemetry and guardrails, and stops it. <code>{port}</code> is required; <code>{model}</code> is the model file picked above (or pick none if the command names its own), <code>{ctx}</code> the module's context size and <code>{gpus}</code> the ticked GPUs (also set as CUDA_VISIBLE_DEVICES). Server and agent modules only; results are marked not comparable.</div>
     <h3>GPUs</h3>
     <div class="chips" id="r-gpus">${gpus.map((g) => `<label><input type="checkbox" value="${g.index}" checked> ${g.index}: ${esc(g.name)} (${Math.round((g.memory_total || 0) / 1024)} GB)</label>`).join("") || '<span class="err">No GPUs visible.</span>'}</div>
     <h3>Presets</h3>
@@ -246,6 +253,8 @@ async function viewRun(_, gen = state.gen) {
   $$(".module").forEach((el) => $(".mod-on", el).addEventListener("change", (e) => el.classList.toggle("off", !e.target.checked)));
   $("#r-review").onclick = reviewRun;
   $("#r-engine").addEventListener("change", syncEngine);
+  $("#r-load-models").onclick = loadRemoteModels;
+  try { $("#r-launch").value = localStorage.getItem("benchkit.launch_cmd") || ""; } catch (_) { /* no storage */ }
   syncEngine();
   $("#pc-change").addEventListener("change", (e) => ($("#pc-choices").hidden = !e.target.checked));
   $("#r-preset-save").onclick = async () => {
@@ -279,20 +288,42 @@ function powerCapCard(sys) {
   </div>`;
 }
 
-function isExternal() {
-  return !!(state.system.engines.find((e) => e.name === $("#r-engine").value) || {}).external;
+function curEngine() {
+  return state.system.engines.find((e) => e.name === $("#r-engine").value) || {};
 }
+function isExternal() { return !!curEngine().external; }
+function isCommand() { return !!curEngine().command; }
 
+let lastEngine = null;
 function syncEngine() {
-  const ext = isExternal();
+  const ext = isExternal(), cmd = isCommand(), reqOnly = ext || cmd;
   $("#r-ext").hidden = $("#r-ext-note").hidden = !ext;
-  $("#r-model").disabled = $("#r-split").disabled = $("#r-ngl").disabled = ext;
+  $("#r-cmd").hidden = $("#r-cmd-note").hidden = !cmd;
+  $("#r-model").disabled = ext;
+  $("#r-split").disabled = $("#r-ngl").disabled = reqOnly;
+  // the custom command may name its own model (vllm serve Qwen/..., ollama): offer "none"
+  const none = $("#r-model option.cmd-none");
+  if (cmd && !none) $("#r-model").insertAdjacentHTML("afterbegin", "<option class='cmd-none' value=''>none: the command names its model</option>");
+  if (!cmd && none) none.outerHTML = "";
+  // a remote server usually runs on another machine: start with no local GPUs ticked
+  if (ext && lastEngine !== "external") $$("#r-gpus input").forEach((i) => (i.checked = false));
+  if (!ext && lastEngine === "external") $$("#r-gpus input").forEach((i) => (i.checked = true));
+  lastEngine = $("#r-engine").value;
   for (const el of $$(".module")) {
     if (!["speed", "offload"].includes(el.dataset.mod)) continue;
     const box = $(".mod-on", el);
-    box.disabled = ext;
-    if (ext && box.checked) { box.checked = false; el.classList.add("off"); }
+    box.disabled = reqOnly;
+    if (reqOnly && box.checked) { box.checked = false; el.classList.add("off"); }
   }
+}
+
+async function loadRemoteModels() {
+  try {
+    const r = await api("/remote/models", { method: "POST", json: { url: $("#r-url").value.trim(), key: $("#r-key").value } });
+    $("#r-smodels").innerHTML = r.models.map((m) => `<option value="${esc(m)}">`).join("");
+    if (!$("#r-smodel").value && r.models.length) $("#r-smodel").value = r.models[0];
+    toast(`${r.models.length} model${r.models.length === 1 ? "" : "s"} on that server`);
+  } catch (e) { toast(e.message || String(e)); }
 }
 
 function collectSpec(forPreset = false) {
@@ -307,14 +338,19 @@ function collectSpec(forPreset = false) {
     ngl: $("#r-ngl").value === "" ? null : parseInt($("#r-ngl").value, 10), label: forPreset ? "" : $("#r-label").value,
     gpus: $$("#r-gpus input:checked").map((i) => +i.value), modules, abort_on,
     power_cap: $("#pc-change").checked && $("input[name=pc]:checked") ? +$("input[name=pc]:checked").value : null,
-    ...(isExternal() ? { server_url: $("#r-url").value.trim(), server_model: $("#r-smodel").value.trim() } : {}) };
+    ...(isExternal() ? { server_url: $("#r-url").value.trim(), server_model: $("#r-smodel").value.trim(),
+                         ...(forPreset ? {} : { server_key: $("#r-key").value }) } : {}),
+    ...(isCommand() ? { launch_cmd: $("#r-launch").value.trim(), server_model: $("#r-cmodel").value.trim() } : {}) };
 }
 
 function applySpec(spec) {
   if (spec.model) $("#r-model").value = spec.model;
   if (spec.engine) $("#r-engine").value = spec.engine;
+  syncEngine();
   $("#r-url").value = spec.server_url || "";
-  $("#r-smodel").value = spec.server_model || "";
+  $("#r-smodel").value = spec.engine === "external" ? spec.server_model || "" : "";
+  if (spec.launch_cmd) $("#r-launch").value = spec.launch_cmd;
+  $("#r-cmodel").value = spec.engine === "command" ? spec.server_model || "" : "";
   $("#r-split").value = spec.split || "";
   $("#r-ngl").value = spec.ngl ?? "";
   $$("#r-gpus input").forEach((i) => (i.checked = (spec.gpus || []).includes(+i.value)));
@@ -344,13 +380,17 @@ function applySpec(spec) {
 async function reviewRun() {
   const box = $("#r-confirm");
   let r;
-  try { r = await api("/runs", { json: collectSpec() }); }
+  const spec = collectSpec();
+  try { r = await api("/runs", { json: spec }); }
   catch (e) { box.innerHTML = `<div class="card err">${esc(e.message)}</div>`; return; }
+  if (spec.launch_cmd) try { localStorage.setItem("benchkit.launch_cmd", spec.launch_cmd); } catch (_) { /* no storage */ }
   const pf = r.preflight;
+  const reqOnly = !!r.spec.server_url || !!r.spec.launch_cmd;
   box.innerHTML = `<div class="card">
     <h2>Confirm</h2>
     <dl class="kv"><dt>Model</dt><dd>${esc(r.spec.model)}</dd><dt>Engine</dt><dd>${esc(r.spec.engine)}${r.spec.server_url ? " at " + esc(r.spec.server_url) : ""}</dd>
-      <dt>GPUs</dt><dd>${esc(r.spec.gpus.join(", "))}${r.spec.gpus.length > 1 ? ", " + esc(r.spec.split) + " split" : ""}${r.spec.ngl != null ? ", ngl " + esc(r.spec.ngl) : ""}</dd><dt>Modules</dt><dd>${esc(Object.keys(r.spec.modules).join(", "))}</dd>
+      ${r.spec.launch_cmd ? `<dt>Command</dt><dd><code>${esc(r.spec.launch_cmd)}</code></dd>` : ""}
+      <dt>GPUs</dt><dd>${r.spec.gpus.length ? esc(r.spec.gpus.join(", ")) : "none (no GPU telemetry)"}${r.spec.gpus.length > 1 && !reqOnly ? ", " + esc(r.spec.split) + " split" : ""}${r.spec.ngl != null ? ", ngl " + esc(r.spec.ngl) : ""}</dd><dt>Modules</dt><dd>${esc(Object.keys(r.spec.modules).join(", "))}</dd>
       <dt>Power cap</dt><dd>${r.spec.power_cap ? esc(r.spec.power_cap + " W for this run, then back to " + powerCapText(state.system.snapshot, r.spec.gpus)) : esc(powerCapText(state.system.snapshot, r.spec.gpus) + " (unchanged)")}</dd>
       <dt>Estimated time</dt><dd>about ${esc(dur(r.estimate_s))} (rough)</dd></dl>
     ${pf.block.length ? `<h3 class="err">Blocked</h3><ul>${pf.block.map((b) => `<li class="err">${esc(b)}</li>`).join("")}</ul>` : ""}

@@ -14,13 +14,30 @@ import json
 from pathlib import Path
 
 
-# A server that is already running somewhere else (another engine such as
-# Strata, or a llama-server you started yourself). The kit only sends it
-# requests: speed and offload need llama.cpp's own tools and are not offered.
-EXTERNAL = {"name": "external", "label": "External server (URL)", "external": True, "available": True,
+# A server that is already running, here or on another machine (vLLM, SGLang,
+# Ollama, LM Studio, Strata, a llama-server you started, a hosted API). The kit
+# only sends it requests: speed and offload need llama.cpp's own tools and are
+# not offered, and with no local GPUs ticked there is no GPU telemetry.
+EXTERNAL = {"name": "external", "label": "Remote server (OpenAI-compatible URL)", "external": True,
+            "requests_only": True, "available": True,
             "repo": "", "commit": "", "cuda_archs": "", "multi_gpu_split": "layer", "env": {},
-            "notes": "Benchmarks an OpenAI-compatible server that is already running (server and agent "
-                     "modules only). Results are marked not comparable."}
+            "notes": "Benchmarks an OpenAI-compatible server that is already running, on this machine or "
+                     "another (server and agent modules). Results are marked not comparable."}
+
+# Any engine with an OpenAI-compatible server, started by the kit on this
+# machine from a command line given with the run: it gets the same telemetry,
+# guardrails and cleanup as the bundled builds, measured through its HTTP API.
+COMMAND = {"name": "command", "label": "Custom command (any engine, started here)", "command": True,
+           "requests_only": True, "available": True,
+           "repo": "", "commit": "", "cuda_archs": "", "multi_gpu_split": "layer", "env": {},
+           "notes": "Starts any OpenAI-compatible server from your command line ({port} is required; "
+                    "{model}, {ctx} and {gpus} are filled in), benchmarks it (server and agent modules) "
+                    "and stops it. Results are marked not comparable."}
+
+
+def requests_only(engine: dict | None) -> bool:
+    """Measured through the HTTP API only (no llama-bench, no llama.cpp log lines to rely on)."""
+    return bool(engine and engine.get("requests_only"))
 
 
 def discover(engines_dir: Path) -> list[dict]:
@@ -36,7 +53,7 @@ def discover(engines_dir: Path) -> list[dict]:
         e.setdefault("env", {})
         e.setdefault("multi_gpu_split", "layer")
         out.append(e)
-    return out + [dict(EXTERNAL)]
+    return out + [dict(EXTERNAL), dict(COMMAND)]
 
 
 SPLIT_MODES = ("layer", "tensor")

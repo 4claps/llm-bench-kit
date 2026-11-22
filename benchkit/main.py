@@ -79,7 +79,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         if app.state.runner.active:
             app.state.runner.active.abort.set()
 
-    app = FastAPI(title="P100 bench kit", lifespan=lifespan, docs_url=None, redoc_url=None)
+    app = FastAPI(title="LLM bench kit", lifespan=lifespan, docs_url=None, redoc_url=None)
 
     @app.middleware("http")
     async def auth(request: Request, call_next):
