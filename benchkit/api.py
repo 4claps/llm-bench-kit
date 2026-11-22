@@ -16,6 +16,7 @@ import urllib.error
 
 from . import export, hw
 from .llserver import list_models
+from .promtel import discover
 from .modules import MODULE_ORDER, MODULES
 from .telemetry import DEFAULT_CHARTS, METRICS
 
@@ -121,6 +122,17 @@ async def remote_models(request: Request):
         raise HTTPException(400, f"/v1/models answered {e.code}" + (" (wrong or missing API key?)" if e.code in (401, 403) else ""))
     except (urllib.error.URLError, OSError, ValueError) as e:
         raise HTTPException(400, f"could not reach the server: {getattr(e, 'reason', e)}")
+
+
+@router.post("/remote/exporters")
+async def remote_exporters(request: Request):
+    """Prometheus exporters on the same host as a remote server (node_exporter :9100, nvidia_gpu_exporter :9835,
+    DCGM :9400), for the New Run telemetry field. Only private and local hosts are checked."""
+    b = await body(request)
+    url = str(b.get("url") or "").strip()
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(400, "give a server URL such as http://10.0.0.5:8080/v1")
+    return {"exporters": await asyncio.to_thread(discover, url)}
 
 
 # ---------------- runs ----------------

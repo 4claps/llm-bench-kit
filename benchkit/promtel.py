@@ -181,3 +181,52 @@ class RemoteSampler:
         return {"gpus": gpus, "cpu": {"model": model, "threads": len(cpus) or None},
                 "memory": {"total_gb": round(mem_total / 2**30, 1) if mem_total else None},
                 "kernel": uname.get("release"), "exporters": len(self.urls), "errors": dict(self.errors)}
+
+
+# The usual ports of the exporters this module reads, checked on the server's own host by discover().
+EXPORTER_PORTS = {9100: "node_exporter", 9835: "nvidia_gpu_exporter", 9400: "dcgm_exporter"}
+KIND_PREFIX = {"node_exporter": "node_", "nvidia_gpu_exporter": "nvidia_smi_", "dcgm_exporter": "DCGM_FI_"}
+
+
+def _private_host(host: str) -> bool:
+    """Only machines on this network (or this one): never probe a hosted API's public servers."""
+    import ipaddress
+    import socket
+    try:
+        addrs = {a[4][0] for a in socket.getaddrinfo(host, None)}
+    except (socket.gaierror, UnicodeError):
+        return False
+    try:
+        return bool(addrs) and all(ipaddress.ip_address(a.split("%")[0]).is_private or
+                                   ipaddress.ip_address(a.split("%")[0]).is_loopback for a in addrs)
+    except ValueError:
+        return False
+
+
+def discover(server_url: str, ports: dict[int, str] | None = None, timeout: float = 2) -> list[dict]:
+    """Exporters on the same host as a remote server: [{"url", "kind"}], checked by what each page serves
+    (a port answering with another exporter's metrics is reported as that one). Empty for public hosts."""
+    import concurrent.futures
+    from urllib.parse import urlsplit
+    host = urlsplit(server_url.strip()).hostname
+    if not host or not _private_host(host):
+        return []
+    hostport = f"[{host}]" if ":" in host else host
+
+    def probe(port: int):
+        url = f"http://{hostport}:{port}/metrics"
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as r:
+                text = r.read(4 << 20).decode("utf-8", "replace")
+        except (urllib.error.URLError, OSError, ValueError):
+            return None
+        names = {n for n, _, _ in parse_prom(text)}
+        for kind, prefix in KIND_PREFIX.items():
+            if any(n.startswith(prefix) for n in names):
+                return {"url": url, "kind": kind}
+        return None
+
+    ports = ports or EXPORTER_PORTS
+    with concurrent.futures.ThreadPoolExecutor(len(ports)) as ex:
+        found = [f for f in ex.map(probe, sorted(ports)) if f]
+    return found

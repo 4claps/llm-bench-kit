@@ -392,3 +392,17 @@ def test_bundled_engine_blocked_on_amd_gpu(env):
                                         "modules": {"server": {}}})
         assert bad.status_code == 400
 
+
+def test_remote_exporters_api(env, monkeypatch):
+    from benchkit import promtel
+    exp, exp_url = _serve_exporters("node_exporter.prom")
+    try:
+        monkeypatch.setattr(promtel, "EXPORTER_PORTS", {int(exp_url.split(":")[2].split("/")[0]): "node_exporter"})
+        with make_client() as c:
+            login(c)
+            r = c.post("/api/remote/exporters", json={"url": "http://127.0.0.1:8080/v1"}).json()
+            assert r == {"exporters": [{"url": exp_url, "kind": "node_exporter"}]}
+            assert c.post("/api/remote/exporters", json={"url": "nope"}).status_code == 400
+    finally:
+        exp.shutdown()
+
